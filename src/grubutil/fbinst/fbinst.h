@@ -31,38 +31,41 @@
 
 #define FB_MENU_FILE		"fb.cfg"
 
-#define FBM_TYPE_FILE		1
-#define FBM_TYPE_MENU		2
-#define FBM_TYPE_TEXT		3
-#define FBM_TYPE_TIMEOUT	4
-#define FBM_TYPE_DEFAULT	5
-#define FBM_TYPE_COLOR		6
+#define FBM_TYPE_MENU		1
+#define FBM_TYPE_TEXT		2
+#define FBM_TYPE_TIMEOUT	3
+#define FBM_TYPE_DEFAULT	4
+#define FBM_TYPE_COLOR		5
 
 #define FBS_TYPE_MENU		1
 #define FBS_TYPE_GRLDR		2
 #define FBS_TYPE_SYSLINUX	3
 #define FBS_TYPE_LINUX		4
 #define FBS_TYPE_MSDOS		5
+#define FBS_TYPE_FREEDOS	6
+#define FBS_TYPE_CHAIN		7
 
 #define FBF_FLAG_EXTENDED	1
 #define FBF_FLAG_SYSLINUX	2
 
-#define OFS_max_sec		0x1ab
-#define OFS_lba			0x1ac
-#define OFS_bootdrv		0x1ad
-#define OFS_spt			0x1ae
-#define OFS_heads		0x1af
-#define OFS_boot_base		0x1b0
-#define OFS_boot_size		0x1b2
+#define OFS_max_sec		0x1ad
+#define OFS_lba			0x1ae
+#define OFS_bootdrv		0x1af
+#define OFS_spt			0x1b0
+#define OFS_heads		0x1b1
+#define OFS_boot_base		0x1b2
 #define OFS_fb_magic		0x1b4
 #define OFS_mbr_table		0x1b8
 
-#define OFS_menu_ofs		0x200
+#define OFS_boot_size		0x200
 #define OFS_flags		0x202
 #define OFS_ver_major		0x204
 #define OFS_ver_minor		0x205
-#define OFS_pri_size		0x206
-#define OFS_ext_size		0x20a
+#define OFS_list_used		0x206
+#define OFS_list_size		0x208
+#define OFS_pri_size		0x20a
+#define OFS_ext_size		0x20c
+
 
 #define COLOR_NORMAL		7
 

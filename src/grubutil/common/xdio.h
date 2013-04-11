@@ -75,6 +75,8 @@ int xd_read (xd_t*, char*, int);
 int xd_write (xd_t*, char*, int);
 void xd_close (xd_t*);
 unsigned long xd_size (xd_t* xd);
+int xd_lock (xd_t * xd);
+void xd_unlock (void);
 
 #if defined(__cplusplus) || defined(c_plusplus)
 }

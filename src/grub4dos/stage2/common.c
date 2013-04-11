@@ -31,34 +31,40 @@
  *  Shared BIOS/boot data.
  */
 
+#ifdef GRUB_UTIL
 struct multiboot_info mbi;
 unsigned long saved_drive;
 unsigned long saved_partition;
+#endif
 char saved_dir[256];
+#ifdef GRUB_UTIL
+unsigned long force_cdrom_as_boot_device = 1;
 //unsigned long cdrom_drives[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 unsigned long cdrom_drive = GRUB_INVALID_DRIVE;
-unsigned long force_cdrom_as_boot_device = 1;
-unsigned long ram_drive;
-unsigned long rd_base = 0;	/* Note the rd_base value of -1 invalidates the ram drive. */
-unsigned long rd_size = 0;	/* The rd_size 0 stands for 4GB, not for length of 0. */
-unsigned long saved_mem_upper;
-unsigned long saved_mem_lower;
+unsigned long ram_drive = 0x7F;	/* default is a floppy. */
+unsigned long long rd_base = 0;	/* Note the rd_base value of -1 invalidates the ram drive. */
+unsigned long long rd_size = 0x100000000ULL;	/* default is 4G */
+unsigned long long saved_mem_higher = 0;
+unsigned long saved_mem_upper = 0;
 unsigned long saved_mmap_addr;
-unsigned long saved_mmap_length;
+unsigned long saved_mmap_length = 0;
+#endif
+unsigned long saved_mem_lower;
 
 #ifndef STAGE1_5
 /* This saves the maximum size of extended memory (in KB).  */
 unsigned long extended_memory;
 unsigned long init_free_mem_start;
 #endif
+#ifdef GRUB_UTIL
 int is64bit = 0;
+grub_error_t errnum = ERR_NONE;
+#endif
 int errorcheck = 1;
 
 /*
  *  Error code stuff.
  */
-
-grub_error_t errnum = ERR_NONE;
 
 #ifndef STAGE1_5
 
@@ -120,9 +126,9 @@ char *err_list[] =
   [ERR_INVALID_FLOPPIES] = "Invalid floppies. Should be between 0 and 2",
   [ERR_INVALID_HARDDRIVES] = "Invalid harddrives. Should be between 0 and 127",
   [ERR_INVALID_LOAD_SEGMENT] = "Invalid load segment. Should be between 0 and 0x9FFF",
-  [ERR_INVALID_LOAD_OFFSET] = "Invalid load offset. Should be between 0 and 0xFFFF",
+  [ERR_INVALID_LOAD_OFFSET] = "Invalid load offset. Should be between 0 and 0xF800",
   [ERR_INVALID_LOAD_LENGTH] = "Invalid load length. Should be between 512 and 0xA0000",
-  [ERR_INVALID_SKIP_LENGTH] = "Invalid skip length. Should be non-negative and less than the file size",
+  [ERR_INVALID_SKIP_LENGTH] = "Invalid skip length. Should be less than the file size",
   [ERR_INVALID_BOOT_CS] = "Invalid boot CS. Should be between 0 and 0xFFFF",
   [ERR_INVALID_BOOT_IP] = "Invalid boot IP. Should be between 0 and 0xFFFF",
   [ERR_INVALID_RAM_DRIVE] = "Invalid ram_drive. Should be between 0 and 254",
@@ -136,6 +142,13 @@ char *err_list[] =
   [ERR_DEFAULT_FILE] = "Invalid DEFAULT file format. Please copy a valid DEFAULT file from the grub4dos release and try again. Also note that the DEFAULT file must be uncompressed.",
   [ERR_PARTITION_TABLE_FULL] = "Cannot use --in-situ because the partition table is full(i.e., all the 4 entries are in use).",
   [ERR_MD5_FORMAT] = "Unrecognized md5 string. You must create it using the MD5CRYPT command.",
+  [ERR_WRITE_GZIP_FILE] = "Attempt to write a gzip file",
+  [ERR_FUNC_CALL] = "Invalid function call",
+  [ERR_INTERNAL_CHECK] = "Internal check failed. Please report this bug.",
+  [ERR_KERNEL_WITH_PROGRAM] = "Kernel cannot load if there is an active process",
+  [ERR_HALT] = "Halt failed.",
+  [ERR_PARTITION_LOOP] = "Too many partitions.",
+//  [ERR_WRITE_TO_NON_MEM_DRIVE] = "Only RAM drives can be written when running in a script",
 
 };
 
@@ -151,8 +164,8 @@ static struct AddrRangeDesc fakemap[3] =
 /* A big problem is that the memory areas aren't guaranteed to be:
    (1) contiguous, (2) sorted in ascending order, or (3) non-overlapping.
    Thus this kludge.  */
-static unsigned long
-mmap_avail_at (unsigned long bottom)
+static unsigned long long
+mmap_avail_at (unsigned long long bottom)
 {
   unsigned long long top;
   unsigned long addr;
@@ -179,12 +192,82 @@ mmap_avail_at (unsigned long bottom)
   while (cont);
 
   /* For now, GRUB assumes 32bits addresses, so...  */
-  if (top > 0xFFFFFFFF)
-    top = 0xFFFFFFFF;
+  if (top > 0x100000000ULL && bottom < 0x100000000ULL)
+      top = 0x100000000ULL;
   
-  return (unsigned long) top - bottom;
+  return top - bottom;
 }
 #endif /* ! STAGE1_5 */
+
+#ifndef GRUB_UTIL
+#ifndef STAGE1_5
+unsigned int
+grub_sleep (unsigned int seconds)
+{
+	unsigned long long j;
+	int time1;
+	int time2;
+
+	/* Get current time.  */
+	while ((time2 = getrtsecs ()) == 0xFF);
+
+	for (j = 0; seconds; j++)
+	{
+	  if ((time1 = getrtsecs ()) != time2 && time1 != 0xFF)
+	    {
+		time2 = time1;
+		seconds--;
+		j = 0;
+		continue;
+	    }
+	  if (j == 0x100000000ULL)
+	    {
+		seconds--;
+		j = 0;
+		continue;
+	    }
+	}
+
+	return seconds;
+}
+
+// check 64bit and PAE
+// return value bit0=PAE supported bit1=AMD64/Intel64 supported
+int check_64bit_and_PAE ()
+{
+    unsigned int has_cpuid_instruction;
+    // check for CPUID instruction
+    asm ( "pushfl; popl %%eax;"	// get original EFLAGS
+	  "movl %%eax, %%edx;"
+	  "xorl $(1<<21), %%eax;"
+	  "pushl %%eax; popfl;"	// try flip bit 21 of EFLAGS
+	  "pushfl; popl %%eax;"	// get the modified EFLAGS
+	  "pushl %%edx; popfl;"	// restore original EFLAGS
+	  "xorl %%edx, %0; shrl $21, %%eax; and $1, %%eax;"	// check for bit 21 difference
+	: "=a"(has_cpuid_instruction) : : "%edx" );
+    if (!has_cpuid_instruction)
+	return 0;
+    unsigned int maxfn,feature;
+    int x=0;
+    asm ("cpuid;" : "=a"(maxfn): "0"(0x00000000) : "%ebx","%ecx","%edx");
+    if (maxfn >= 0x00000001)
+    {
+	asm ("cpuid;" : "=d" (feature) : "a" (1) : "%ebx", "%ecx");
+	if (feature & (1<<6)) // PAE
+	    x |= IS64BIT_PAE;
+    }
+    asm ("cpuid;" : "=a"(maxfn): "0"(0x80000000) : "%ebx","%ecx","%edx");
+    if (maxfn >= 0x80000001)
+    {
+	asm ("cpuid;" : "=d" (feature) : "a" (0x80000001) : "%ebx", "%ecx");
+	if (feature & (1<<29)) // AMD64, EM64T/IA-32e/Intel64
+	    x |= IS64BIT_AMD64;
+    }
+    return x;
+}
+
+#endif /* ! STAGE1_5 */
+#endif /* ! GRUB_UTIL */
 
 /* This queries for BIOS information.  */
 void
@@ -200,10 +283,21 @@ init_bios_info (void)
 #endif /* ! STAGE1_5 */
 #endif /* ! GRUB_UTIL */
 
+#ifndef GRUB_UTIL
+#ifndef STAGE1_5
+  is64bit = check_64bit_and_PAE ();
+#endif /* ! STAGE1_5 */
+#endif /* ! GRUB_UTIL */
+
+#ifndef GRUB_UTIL
+  /* initialize mem alloc array */
+  mem_alloc_array_start[0].addr = free_mem_start;
+  mem_alloc_array_start[1].addr = 0;	/* end the array */
+#endif /* ! GRUB_UTIL */
+
   /*
    *  Get information from BIOS on installed RAM.
    */
-
 #ifndef STAGE1_5
   DEBUG_SLEEP
   printf("\rGet lower memory... ");
@@ -227,34 +321,13 @@ init_bios_info (void)
   printf("\rTurning on gate A20...                          ");
 #if 1
     {
-	unsigned long j;
-	int wait;
-	int time1;
-	int time2;
-
 	if (gateA20 (1))			/* int15/24 -----safe enough */
 	{
 		/* wipe out the messages on success */
 		printf("\r                                                                \r");
-		wait = 0;	/* sleep 0 second after A20 control */
 	} else {
 		printf("Failure! Report bug, please!\n");
-		wait = 5;	/* sleep 5 second on failure */
-	}
-
-	/* Get current time.  */
-	while ((time2 = getrtsecs ()) == 0xFF);
-
-	for (j = 0; j < 0x00800000; j++)
-	{
-	  if ((time1 = getrtsecs ()) != time2 && time1 != 0xFF)
-	    {
-	      if (wait == 0)
-		  break;
-	      
-	      time2 = time1;
-	      wait--;
-	    }
+		grub_sleep (5);	/* sleep 5 second on failure */
 	}
     }
 #else
@@ -276,9 +349,10 @@ init_bios_info (void)
    *  unused by GRUB.
    */
 
-  addr = get_code_end ();
-  saved_mmap_addr = addr;
-  saved_mmap_length = 0;
+#ifdef GRUB_UTIL
+  saved_mmap_addr = get_code_end ();
+#endif
+  addr = saved_mmap_addr;
   cont = 0;
 
   printf("\rGet E820 memory...           ");
@@ -310,6 +384,7 @@ init_bios_info (void)
        */
       saved_mem_lower = mmap_avail_at (0) >> 10;
       saved_mem_upper = mmap_avail_at (0x100000) >> 10;
+      saved_mem_higher = mmap_avail_at (0x100000000ULL) >> 10;
 
       /* Find the maximum available address. Ignore any memory holes.  */
       for (max_addr = 0, addr = saved_mmap_addr;
@@ -335,9 +410,21 @@ init_bios_info (void)
       else
 	extended_memory = memtmp;
       
+      saved_mem_upper = memtmp;
+
       if (!cont || (memtmp == 0x3c00))
-	memtmp += (cont >> 10);
-      else
+	{
+	  saved_mem_upper += (cont >> 10);
+
+//	  /* XXX should I do this at all ??? */
+//
+//	  saved_mmap_addr = (unsigned long) fakemap;
+//	  saved_mmap_length = sizeof (struct AddrRangeDesc) * 2;
+//	  fakemap[0].Length = (saved_mem_lower << 10);
+//	  fakemap[1].Length = (saved_mem_upper << 10);
+//	  fakemap[2].Length = 0;
+	}
+      //else
 	{
 	  /* XXX should I do this at all ??? */
 
@@ -347,8 +434,6 @@ init_bios_info (void)
 	  fakemap[1].Length = (memtmp << 10);
 	  fakemap[2].Length = cont;
 	}
-
-      saved_mem_upper = memtmp;
     }
 
   printf("\r                        \r");	/* wipe out the messages */
@@ -358,10 +443,7 @@ init_bios_info (void)
   mbi.mmap_addr = saved_mmap_addr;
   mbi.mmap_length = saved_mmap_length;
 
-#ifndef GRUB_UTIL
-  is64bit = check_64bit ();
-#endif
-
+#if 0
   /* Get the drive info.  */
   /* FIXME: This should be postponed until a Multiboot kernel actually
      requires it, because this could slow down the start-up
@@ -394,10 +476,10 @@ init_bios_info (void)
 	continue;//break;
 
       if (debug > 1)
-	grub_printf (" %sC/H/S=%d/%d/%d, Sector Count/Size=%d/%d\n",
-		(tmp_geom.flags & BIOSDISK_FLAG_LBA_EXTENSION) ? "LBA, " : "",
+	grub_printf (" %sC/H/S=%d/%d/%d, Sector Count/Size=%ld/%d\n",
+		((tmp_geom.flags & BIOSDISK_FLAG_LBA_EXTENSION) ? "LBA, " : ""),
 		tmp_geom.cylinders, tmp_geom.heads, tmp_geom.sectors,
-		tmp_geom.total_sectors, tmp_geom.sector_size);
+		(unsigned long long)tmp_geom.total_sectors, tmp_geom.sector_size);
       
       /* Set the information.  */
       info->drive_number = drive;
@@ -412,10 +494,15 @@ init_bios_info (void)
       info->size = addr - (unsigned long) info;
       mbi.drives_length += info->size;
     }
+#endif
 
+#ifdef GRUB_UTIL
   init_free_mem_start = addr;
+#else
+  init_free_mem_start = get_code_end ();
+#endif
 
-  DEBUG_SLEEP
+  //DEBUG_SLEEP
 
   /*
    *  Initialize other Multiboot Info flags.
@@ -429,6 +516,7 @@ init_bios_info (void)
 
 #ifndef GRUB_UTIL
 #ifndef STAGE1_5
+#ifdef FSYS_PXE
     force_pxe_as_boot_device = 0;
     if (! ((*(char *)0x8205) & 0x01))	/* if it is not disable pxe */
     {
@@ -443,7 +531,7 @@ init_bios_info (void)
 
 	    if (pxe_entry)
 	    {
-		pxe_basemem = *((unsigned short*)0x413);
+		//pxe_basemem = *((unsigned short*)0x413);
 
 		get_cached_info.PacketType = PXENV_PACKET_TYPE_DHCP_ACK;
 		get_cached_info.Buffer = get_cached_info.BufferSize = 0;
@@ -501,23 +589,31 @@ pxe_init_fail:
 	}
     }
 pxe_init_done:
-#endif /* STAGE1_5 */
+#endif /* FSYS_PXE */
+#endif /* ! STAGE1_5 */
 #endif /* ! GRUB_UTIL */
 
 #if !defined(STAGE1_5) && !defined(GRUB_UTIL)
   /* Set cdrom drive.  */
     
+#ifdef GRUB_UTIL
+#define FIND_DRIVES 8
+#else
+#define FIND_DRIVES (*((char *)0x475))
+#endif
     /* Get the geometry.  */
     if (debug > 1)
 	printf("\rboot drive=%X, ", boot_drive);
-    cdrom_drive = get_cdinfo (boot_drive, &tmp_geom);
-    if (! cdrom_drive || cdrom_drive != boot_drive)
-	cdrom_drive = GRUB_INVALID_DRIVE;
-    if (cdrom_drive == GRUB_INVALID_DRIVE)
+    if ((((unsigned char)boot_drive) >= 0x80 + FIND_DRIVES)
+	&& ! ((*(char *)0x8205) & 0x10))	/* if it is not disable startup cdrom drive look-up. */
     {
-	/* read the first sector of the drive */
-	if (((unsigned char)boot_drive) >= 0x80 + FIND_DRIVES)
+	cdrom_drive = get_cdinfo (boot_drive, &tmp_geom);
+	if (! cdrom_drive || cdrom_drive != boot_drive)
+		cdrom_drive = GRUB_INVALID_DRIVE;
+
+	if (cdrom_drive == GRUB_INVALID_DRIVE)
 	{
+		/* read the first sector of the drive */
 		struct disk_address_packet
 		{
 			unsigned char length;
@@ -553,32 +649,35 @@ pxe_init_done:
 			}
 		}
 
-	} /* if (geometry->flags & BIOSDISK_FLAG_LBA_EXTENSION) */
+	}
     }
+#undef FIND_DRIVES
 
     if (debug > 1)
-	printf("%s\n", cdrom_drive == GRUB_INVALID_DRIVE ? "Not CD":"Is CD");
+	printf("%s\n", (cdrom_drive == GRUB_INVALID_DRIVE ? "Not CD":"Is CD"));
   DEBUG_SLEEP
 #endif
   
 #if !defined(STAGE1_5) && !defined(GRUB_UTIL)
 
-  if (cdrom_drive == GRUB_INVALID_DRIVE)  
+  if (cdrom_drive == GRUB_INVALID_DRIVE
+     && ! ((*(char *)0x8205) & 0x10))	/* if it is not disable startup cdrom drive look-up. */
   {
     int err;
     int version;
     struct drive_parameters *drp = (struct drive_parameters *)0x600;
 
-#undef FIND_DRIVES
 #ifdef GRUB_UTIL
 #define FIND_DRIVES 8
 #else
 #define FIND_DRIVES (*((char *)0x475))
 #endif
-    for (drive = 0xFF; drive >= 0x7F; drive--)
+	/* Drive 7F causes hang on motherboard "jetway 694AS/TAS", as reported
+	 * by renfeide112@126.com, 2009-09-30. So no more play with 7F. */
+    for (drive = 0xFF; drive > 0x7F; drive--)
     {
       if (drive >= 0x80 && drive < 0x80 + FIND_DRIVES)
-	continue;
+	continue;	/* skip hard drives */
       
       /* Get the geometry.  */
       if (debug > 1)
@@ -680,6 +779,7 @@ set_root:
   /* Set root drive and partition.  */
   saved_drive = boot_drive;
   saved_partition = install_partition;
+  force_cdrom_as_boot_device = 0;
 
 #ifndef GRUB_UTIL
 #ifndef STAGE1_5
@@ -693,7 +793,6 @@ set_root:
 
   /* check the header signature "HdrS" (0x53726448) */
 
-  ram_drive = 0x7f;	/* the default ram_drive is a floppy. */
   if (*(unsigned long*)(int*)(0xA00 + 0x202) == 0x53726448)
   {
 	unsigned long initrd_addr;

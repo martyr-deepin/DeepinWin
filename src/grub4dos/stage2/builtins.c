@@ -27,6 +27,7 @@
 #include <shared.h>
 #include <filesys.h>
 #include <term.h>
+#include "iamath.h"
 
 #ifdef SUPPORT_NETBOOT
 # define GRUB	1
@@ -54,19 +55,22 @@
 /* The type of kernel loaded.  */
 kernel_t kernel_type;
 static kernel_t kernel_type_orig;
+
 /* The boot device.  */
 static int bootdev = 0;
-#if 0
-/* True when the debug mode is turned on, and false
-   when it is turned off.  */
-int debug = 0;
-#else
+
+#ifdef GRUB_UTIL
 /* 0 for silent, 1 for normal, 2..MAX_UINT for verbose.
  * if debug == MAX_UINT or debug < 0, then filesystem debug mode is on.
  * (MAX_UINT is 0x7FFFFFFF)
  */
 int debug = 1;
+
+int use_config_file = 1;
+unsigned long free_mem_start;
+unsigned long free_mem_end;
 #endif
+
 /* The default entry.  */
 int default_entry = 0;
 /* The fallback entry.  */
@@ -74,6 +78,10 @@ int fallback_entryno;
 int fallback_entries[MAX_FALLBACK_ENTRIES];
 /* The number of current entry.  */
 int current_entryno;
+#ifdef SUPPORT_GFX
+/* graphics file */
+char graphics_file[64];
+#endif
 /* The address for Multiboot command-line buffer.  */
 static char *mb_cmdline;// = (char *) MB_CMDLINE_BUF;
 static char kernel_option_video[64] = {0};/* initialize the first byte to 0 */
@@ -87,10 +95,15 @@ int auth = 0;
 int grub_timeout = -1;
 /* Whether to show the menu or not.  */
 int show_menu = 1;
+/* Don't display a countdown message for the hidden menu */
+int silent_hiddenmenu = 0;
 
-int use_config_file = 1;
+unsigned long pxe_restart_config = 0;
+#ifndef GRUB_UTIL
+unsigned long configfile_in_menu_init = 0;
+#endif /* ! GRUB_UTIL */
 
-extern unsigned long i;
+//extern unsigned long i;
 //extern char *mbr;
 #if !defined(STAGE1_5) && !defined(GRUB_UTIL)
 /* The first sector of stage2 can be reused as a tmp buffer.
@@ -119,8 +132,6 @@ extern int outline;
 //static int floppy_not_inserted[4] = {0, 0, 0, 0};
 
 /* The BIOS drive map.  */
-extern struct drive_map_slot   bios_drive_map[DRIVE_MAP_SIZE + 1];
-extern struct drive_map_slot hooked_drive_map[DRIVE_MAP_SIZE + 1];
 int drive_map_slot_empty (struct drive_map_slot item);
 
 /* backup of original BIOS floppy-count byte in 0x410 */
@@ -177,6 +188,7 @@ static int is_io_orig = 0;
 static char chainloader_file[256];
 static char chainloader_file_orig[256];
 
+
 static const char *warning_defaultfile = "# WARNING: If you want to edit this file directly, do not remove any line";
 
 #ifndef GRUB_UTIL
@@ -212,16 +224,18 @@ drive_map_slot_equal (struct drive_map_slot a, struct drive_map_slot b)
 	//if (a.sector_count != b.sector_count) return 0;
 	//return 1;
 }
-static int map_func (char *arg, int flags);
-static int disable_map_info = 0;
+int map_func (char *arg, int flags);
+int disable_map_info = 0;
 #endif /* ! GRUB_UTIL */
 
 /* Prototypes for allowing straightfoward calling of builtins functions
    inside other functions.  */
 static int configfile_func (char *arg, int flags);
+void lba_to_chs (unsigned long lba, unsigned long *cl, unsigned long *ch, unsigned long *dh);
 //static char *set_device (char *device);
 //static int real_open_partition (int flags);
 //static int open_partition (void);
+int command_func (char *arg, int flags);
 int commandline_func (char *arg, int flags);
 int errnum_func (char *arg, int flags);
 int checkrange_func (char *arg, int flags);
@@ -254,8 +268,8 @@ disk_read_print_func (unsigned long sector, unsigned long offset, unsigned long 
 }
 
 extern int rawread_ignore_memmove_overflow; /* defined in disk_io.c */
-static long query_block_entries = 0;
-static unsigned long map_start_sector = 0;
+long query_block_entries;
+unsigned long map_start_sector;
 static unsigned long map_num_sectors = 0;
 
 static unsigned long blklst_start_sector;
@@ -273,7 +287,7 @@ disk_read_blocklist_func (unsigned long sector, unsigned long offset, unsigned l
       if (blklst_num_sectors > 0)
 	{
 	  if (blklst_start_sector + blklst_num_sectors == sector
-	      && offset == 0 && blklst_last_length == buf_geom.sector_size/*SECTOR_SIZE*/)
+	      && offset == 0 && blklst_last_length == buf_geom.sector_size)
 	    {
 	      blklst_num_sectors++;
 	      blklst_last_length = length;
@@ -283,17 +297,17 @@ disk_read_blocklist_func (unsigned long sector, unsigned long offset, unsigned l
 	    {
 	      if (query_block_entries >= 0)
 	        {
-		  if (blklst_last_length == buf_geom.sector_size/*SECTOR_SIZE*/)
-		    grub_printf ("%s%d+%d", blklst_num_entries ? "," : "",
-			     blklst_start_sector - part_start, blklst_num_sectors);
+		  if (blklst_last_length == buf_geom.sector_size)
+		    grub_printf ("%s%ld+%d", (blklst_num_entries ? "," : ""),
+			     (unsigned long long)(blklst_start_sector - part_start), blklst_num_sectors);
 		  else if (blklst_num_sectors > 1)
-		    grub_printf ("%s%d+%d,%d[0-%d]", blklst_num_entries ? "," : "",
-			     blklst_start_sector - part_start, blklst_num_sectors-1,
-			     blklst_start_sector + blklst_num_sectors-1 - part_start, 
+		    grub_printf ("%s%ld+%d,%ld[0-%d]", (blklst_num_entries ? "," : ""),
+			     (unsigned long long)(blklst_start_sector - part_start), (blklst_num_sectors-1),
+			     (unsigned long long)(blklst_start_sector + blklst_num_sectors-1 - part_start), 
 			     blklst_last_length);
 		  else
-		    grub_printf ("%s%d[0-%d]", blklst_num_entries ? "," : "",
-			     blklst_start_sector - part_start, blklst_last_length);
+		    grub_printf ("%s%ld[0-%d]", (blklst_num_entries ? "," : ""),
+			     (unsigned long long)(blklst_start_sector - part_start), blklst_last_length);
 	        }
 	      blklst_num_entries++;
 	      blklst_num_sectors = 0;
@@ -303,8 +317,8 @@ disk_read_blocklist_func (unsigned long sector, unsigned long offset, unsigned l
       if (offset > 0)
 	{
 	  if (query_block_entries >= 0)
-	  grub_printf("%s%d[%d-%d]", blklst_num_entries ? "," : "",
-		      sector - part_start, offset, offset + length);
+	  grub_printf("%s%ld[%d-%d]", (blklst_num_entries ? "," : ""),
+		      (unsigned long long)(sector - part_start), offset, (offset + length));
 	  blklst_num_entries++;
 	}
       else
@@ -319,12 +333,16 @@ disk_read_blocklist_func (unsigned long sector, unsigned long offset, unsigned l
 static int
 blocklist_func (char *arg, int flags)
 {
-#ifdef GRUB_UTIL
-  char *dummy = (char *) RAW_ADDR (0x100000);
-#else
-  char *dummy = (char *) RAW_ADDR (0x400000);
-#endif
+//#ifdef GRUB_UTIL
+//  char *dummy = (char *) RAW_ADDR (0x100000);
+//#else
+//  char *dummy = (char *) RAW_ADDR (0x400000);
+//#endif
+  char *dummy = NULL;
   int err;
+#ifndef NO_DECOMPRESSION
+  int no_decompression_bak = no_decompression;
+#endif
   
   blklst_start_sector = 0;
   blklst_num_sectors = 0;
@@ -334,48 +352,57 @@ blocklist_func (char *arg, int flags)
   map_start_sector = 0;
   map_num_sectors = 0;
 
-//grub_printf ("before open()\n");
   /* Open the file.  */
   if (! grub_open (arg))
     goto fail_open;
-//grub_printf ("after open()\n");
-//grub_printf ("geometry->sector_size=%d\n", buf_geom.sector_size);
+
+#ifndef NO_DECOMPRESSION
+  if (compressed_file)
+  {
+    if (query_block_entries < 0)
+    {
+	/* compressed files are not considered contiguous. */
+	query_block_entries = 3;
+	goto fail_read;
+    }
+
+    grub_close ();
+    no_decompression = 1;
+    if (! grub_open (arg))
+	goto fail_open;
+  }
+#endif /* NO_DECOMPRESSION */
 
   /* Print the device name.  */
   if (query_block_entries >= 0)
-  grub_printf ("(%cd%d",
-	       (current_drive & 0x80) ? 'h' : 'f',
-	       current_drive & ~0x80);
+  {
+	grub_printf ("(%cd%d", ((current_drive & 0x80) ? 'h' : 'f'), (current_drive & ~0x80));
   
-  if ((current_partition & 0xFF0000) != 0xFF0000)
-    if (query_block_entries >= 0)
-    grub_printf (",%d", (current_partition >> 16) & 0xFF);
+	if ((current_partition & 0xFF0000) != 0xFF0000)
+	    grub_printf (",%d", ((unsigned char)(current_partition >> 16)));
   
-  if ((current_partition & 0x00FF00) != 0x00FF00)
-    if (query_block_entries >= 0)
-    grub_printf (",%c", 'a' + ((current_partition >> 8) & 0xFF));
+	if ((current_partition & 0x00FF00) != 0x00FF00)
+	    grub_printf (",%c", ('a' + ((unsigned char)(current_partition >> 8))));
   
-  if (query_block_entries >= 0)
-  grub_printf (")");
+	grub_printf (")");
+  }
 
-//grub_printf ("before read()\n");
   rawread_ignore_memmove_overflow = 1;
   /* Read in the whole file to DUMMY.  */
   disk_read_hook = disk_read_blocklist_func;
-  err = grub_read (dummy, query_block_entries < 0 ? buf_geom.sector_size/*SECTOR_SIZE*/ : -1);
+  err = grub_read ((unsigned long long)(unsigned int)dummy, (query_block_entries < 0 ? buf_geom.sector_size : -1ULL), 0xedde0d90);
   disk_read_hook = 0;
   rawread_ignore_memmove_overflow = 0;
   if (! err)
     goto fail_read;
-//grub_printf ("after read()\n");
 
   /* The last entry may not be printed yet.  Don't check if it is a
    * full sector, since it doesn't matter if we read too much. */
   if (blklst_num_sectors > 0)
     {
       if (query_block_entries >= 0)
-        grub_printf ("%s%d+%d", blklst_num_entries ? "," : "",
-		 blklst_start_sector - part_start, blklst_num_sectors);
+        grub_printf ("%s%ld+%d", (blklst_num_entries ? "," : ""),
+		 (unsigned long long)(blklst_start_sector - part_start), blklst_num_sectors);
       blklst_num_entries++;
     }
 
@@ -393,7 +420,6 @@ blocklist_func (char *arg, int flags)
 #endif
   if (query_block_entries < 0)
     {
-//grub_printf ("blklist1: start_sector=%d, num_sectors=%d, num_entries=%d, last_length=%d, filepos=%d, filemax=%d\n",start_sector, num_sectors, num_entries, last_length, filepos, filemax);
       map_start_sector = blklst_start_sector;
       blklst_start_sector = 0;
       blklst_num_sectors = 0;
@@ -401,22 +427,28 @@ blocklist_func (char *arg, int flags)
       blklst_last_length = 0;
       rawread_ignore_memmove_overflow = 1;
       /* read in the last sector to DUMMY */
-      filepos = filemax ? (filemax - 1) & (-buf_geom.sector_size/*SECTOR_SIZE*/) : filemax;
+      filepos = filemax ? (filemax - 1) & (-(unsigned long long)buf_geom.sector_size) : filemax;
       disk_read_hook = disk_read_blocklist_func;
-      err = grub_read (dummy, -1);
+      err = grub_read ((unsigned long long)(unsigned int)dummy, -1ULL, 0xedde0d90);
       disk_read_hook = 0;
       rawread_ignore_memmove_overflow = 0;
-//grub_printf ("blklist2: start_sector=%d, num_sectors=%d, num_entries=%d, last_length=%d, filepos=%d, filemax=%d, map_num_sectors=%d, query_block_entries=%d\n",start_sector, num_sectors, num_entries, last_length, filepos, filemax, map_num_sectors, query_block_entries);
       if (! err)
         goto fail_read;
       map_num_sectors = blklst_start_sector - map_start_sector + 1;
       query_block_entries = filemax ? 
-	      map_num_sectors - ((filemax - 1) / buf_geom.sector_size/*>> SECTOR_BITS*/) : 2;
+	      map_num_sectors - ((filemax - 1) >> log2_tmp (buf_geom.sector_size)/*>> SECTOR_BITS*/) : 2;
     }
 
 fail_read:
+
   grub_close ();
+
 fail_open:
+
+#ifndef NO_DECOMPRESSION
+  no_decompression = no_decompression_bak;
+#endif
+
   if (query_block_entries < 0)
     query_block_entries = 0;
   return ! errnum;
@@ -447,7 +479,7 @@ static long expand_file(char* src,char* dst);
 
 static void ibuf_init(char* buf)
 {
-  //int i;
+  int i;
 
   ibuf_ptr=buf;
   ibuf_pos=0;
@@ -660,11 +692,13 @@ boot_func (char *arg, int flags)
     case KERNEL_TYPE_FREEBSD:
     case KERNEL_TYPE_NETBSD:
       /* *BSD */
-      bsd_boot (kernel_type, bootdev, (char *) mbi.cmdline);
+      bsd_boot (kernel_type, /*0*/bootdev, (char *) mbi.cmdline);
       break;
 
     case KERNEL_TYPE_LINUX:
       /* Linux */
+      map_func ("(0x22) (0x22)", flags);	/* delete mapping for INITRD_DRIVE */
+      map_func ("--rehook", flags);
       linux_boot ();
       break;
 
@@ -674,9 +708,9 @@ boot_func (char *arg, int flags)
 #ifdef FSYS_PXE
       if (pxe_entry == 0)
       {
-	unsigned long p;
+	unsigned int p;
 	/* check grub.exe */
-	for (p = 0x100000; p < 0x108000; p += 0x200)
+	for (p = (unsigned int)linux_bzimage_tmp_addr; p < (unsigned int)linux_bzimage_tmp_addr + 0x8000; p += 0x200)
 	{
 		if (((*(long long *)(void *)p & 0xFFFF00FFFFFFFFFFLL) == 0x02030000008270EALL) &&
 			((*(long long *)(void *)(p + 0x12) & 0xFFFFFFFFFFLL) == 0x0037392E30LL))
@@ -688,6 +722,8 @@ boot_func (char *arg, int flags)
       }
 #endif
 
+      map_func ("(0x22) (0x22)", flags);	/* delete mapping for INITRD_DRIVE */
+      map_func ("--rehook", flags);
       big_linux_boot ();
       break;
 
@@ -779,7 +815,7 @@ boot_func (char *arg, int flags)
       
 #undef MIN_EMU_BASE
 	      //filepos = 0;
-	      if (grub_read ((char *)((int)base), -1) != filemax)
+	      if (grub_read (base, -1ULL, 0xedde0d90) != filemax)
 		{
 			grub_close ();
 			if (errnum == ERR_NONE)
@@ -815,7 +851,7 @@ boot_func (char *arg, int flags)
 		 * the backup area of DOS memory.
 		 */
 
-		if (grub_read ((char *) 0x200000, read_length) != read_length)
+		if (grub_read ((unsigned long long) 0x200000, read_length, 0xedde0d90) != read_length)
 		  {
 		    grub_close ();
 		    kernel_type = KERNEL_TYPE_NONE;
@@ -910,11 +946,14 @@ boot_func (char *arg, int flags)
 		  if (! probe_bpb((struct master_and_dos_boot_sector *)0x200000))
 			if (*((unsigned long *) (0x20001C)) == 0)
 			{
-			    if (probe_mbr ((struct master_and_dos_boot_sector *)0x200000, 0, ((chainloader_load_length + 511) >> 9), 0))
-			    {
-				errnum = ERR_HD_VOL_START_0;
-		  		break;
-			    }
+				int err;
+				if ((err = probe_mbr ((struct master_and_dos_boot_sector *)0x200000, 0, ((chainloader_load_length + 511) >> 9), 0)))
+				{
+					if (debug > 0)
+						printf ("Partition table not recognized(chainloader_edx=0x%X, err=%d). ", chainloader_edx, err);
+					errnum = ERR_HD_VOL_START_0;
+					break;
+				}
 			}
 		} else {
 		  /* clear number of hidden sectors for floppy */
@@ -998,11 +1037,14 @@ boot_func (char *arg, int flags)
 	  if (! probe_bpb((struct master_and_dos_boot_sector *)0x7C00))
 	    if (*((unsigned long *) (0x7C00 + 0x1C)) == 0)
 	    {
-	      if (probe_mbr ((struct master_and_dos_boot_sector *)0x7C00, 0, 1, 0))
-	      {
-		errnum = ERR_HD_VOL_START_0;
-	  	break;
-	      }
+		int err;
+		if ((err = probe_mbr ((struct master_and_dos_boot_sector *)0x7C00, 0, 1, 0)))
+		{
+			if (debug > 0)
+				printf ("Partition table not recognized(boot_drive=0x%X, err=%d). ", boot_drive, err);
+			errnum = ERR_HD_VOL_START_0;
+		  	break;
+		}
 	    }
 	}
 #ifdef FSYS_PXE
@@ -1030,7 +1072,56 @@ boot_func (char *arg, int flags)
       }
 #endif
 
-      multi_boot ((int) entry_addr, (int) &mbi);
+	/* Get the drive info.  */
+	mbi.drives_length = 0;
+	mbi.drives_addr = (unsigned long)(saved_mmap_addr + saved_mmap_length);
+
+	/* XXX: Too many drives will possibly use a piece of memory starting at 0x10000(64K). */
+
+#ifdef GRUB_UTIL
+#define FIND_DRIVES 8
+#else
+#define FIND_DRIVES (*((char *)0x475))
+#endif
+      {
+	unsigned int drive;
+	unsigned long addr = mbi.drives_addr;
+
+	for (drive = 0x80; drive < 0x80 + FIND_DRIVES; drive++)
+	{
+	    struct drive_info *info = (struct drive_info *) addr;
+      
+	    /* Get the geometry. This ensures that the drive is present.  */
+
+	    if (debug > 1)
+		grub_printf ("get_diskinfo(%X), ", drive);
+
+	    if (get_diskinfo (drive, &tmp_geom))
+		continue;//break;
+
+	    if (debug > 1)
+		grub_printf (" %sC/H/S=%d/%d/%d, Sector Count/Size=%ld/%d\n",
+			((tmp_geom.flags & BIOSDISK_FLAG_LBA_EXTENSION) ? "LBA, " : ""),
+			tmp_geom.cylinders, tmp_geom.heads, tmp_geom.sectors,
+			(unsigned long long)tmp_geom.total_sectors, tmp_geom.sector_size);
+      
+	    /* Set the information.  */
+	    info->drive_number = drive;
+	    info->drive_mode = ((tmp_geom.flags & BIOSDISK_FLAG_LBA_EXTENSION)
+				? MB_DI_LBA_MODE : MB_DI_CHS_MODE);
+	    info->drive_cylinders = tmp_geom.cylinders;
+	    info->drive_heads = tmp_geom.heads;
+	    info->drive_sectors = tmp_geom.sectors;
+
+	    addr += sizeof (struct drive_info);
+
+	    info->size = addr - (unsigned long) info;
+	    mbi.drives_length += info->size;
+	}
+      }
+#undef FIND_DRIVES
+
+      multi_boot ((int) entry_addr, (int) &mbi, 0, -1, 0, 0, 0);
       break;
 
     default:
@@ -1123,7 +1214,7 @@ void hexdump(unsigned long ofs,char* buf,int len)
 
       for (k=0;k<cnt;k++)
         {	  
-          printf("%02X ", (unsigned char)(buf[k]));
+          printf("%02X ", (unsigned long)(unsigned char)(buf[k]));
           if ((k!=15) && ((k & 3)==3))
             printf(" ");
         }
@@ -1138,7 +1229,7 @@ void hexdump(unsigned long ofs,char* buf,int len)
       printf("; ");
 
       for (k=0;k<cnt;k++)
-        printf("%c",((buf[k]>=32) && (buf[k]<127))?buf[k]:'.');
+        printf("%c",(unsigned long)((((unsigned char)buf[k]>=32) && ((unsigned char)buf[k]!=127))?buf[k]:'.'));
 
       printf("\n");
 
@@ -1156,34 +1247,44 @@ static int
 cat_func (char *arg, int flags)
 {
   unsigned char c;
-  unsigned char s[] = "0123456789abcdef";
-  int Hex = 0;
-  unsigned long len, j;
+  unsigned char s[128];
+  unsigned char r[128];
+  unsigned long long Hex = 0;
+  unsigned long long len, i, j;
   char *p;
-  unsigned long skip = 0;
-  unsigned long length = 0xffffffff;
+  unsigned long long skip = 0;
+  unsigned long long length = 0xffffffffffffffffULL;
   char *locate = 0;
-  unsigned long len1;
-  unsigned long ret = 0;
+  char *replace = 0;
+  unsigned long long locate_align = 1;
+  unsigned long long len_s;
+  unsigned long long len_r = 0;
+  unsigned long long ret = 0;
 
   quit_print = 0;
 
   for (;;)
   {
-    if (grub_memcmp (arg, "--hex", 5) == 0)
+	if (grub_memcmp (arg, "--hex=", 6) == 0)
+	{
+		p = arg + 6;
+		if (! safe_parse_maxint (&p, &Hex))
+			return 0;
+	}
+    else if (grub_memcmp (arg, "--hex", 5) == 0)
       {
 	Hex = 1;
       }
     else if (grub_memcmp (arg, "--skip=", 7) == 0)
       {
 	p = arg + 7;
-	if (! safe_parse_maxint (&p, (int *)(void *)&skip))
+	if (! safe_parse_maxint_with_suffix (&p, &skip, 0))
 		return 0;
       }
     else if (grub_memcmp (arg, "--length=", 9) == 0)
       {
 	p = arg + 9;
-	if (! safe_parse_maxint (&p, (int *)(void *)(&length)))
+	if (! safe_parse_maxint_with_suffix (&p, &length, 0))
 		return 0;
       }
     else if (grub_memcmp (arg, "--locate=", 9) == 0)
@@ -1195,74 +1296,178 @@ cat_func (char *arg, int flags)
 	  arg = ++p; // or: arg = p;
 	}
       }
+    else if (grub_memcmp (arg, "--replace=", 10) == 0)
+      {
+	p = replace = arg + 10;
+	if (*replace == '*')
+	{
+        replace++;
+        if (! safe_parse_maxint (&replace, &len_r))
+			replace = p;
+	} 
+	if (*p == '\"')
+	{
+	  while (*(++p) != '\"');
+	  arg = ++p;
+	}
+      }
+    else if (grub_memcmp (arg, "--locate-align=", 15) == 0)
+      {
+	p = arg + 15;
+	if (! safe_parse_maxint (&p, &locate_align))
+		return 0;
+	if ((unsigned long)locate_align == 0)
+		return ! (errnum = ERR_BAD_ARGUMENT);
+      }
     else
 	break;
     arg = skip_to (0, arg);
   }
-  
+  if (! length)
+  {
+    if (grub_memcmp (arg,"()-1\0",5) == 0 )
+    {
+        if (! grub_open ("()+1"))
+            return 0;
+        filesize = filemax*(unsigned long long)part_start;
+    } 
+    else if (grub_memcmp (arg,"()\0",3) == 0 )
+    {
+        if (! grub_open ("()+1"))
+            return 0;
+        filesize = filemax*(unsigned long long)part_length;
+    }
+    else 
+    {
+       if (! grub_open (arg))
+            return 0;
+#ifndef NO_DECOMPRESSION
+       filesize = gzip_filemax;
+#else
+       filesize = filemax;
+#endif
+    }
+	grub_close();
+	if (debug > 0)
+		grub_printf ("Filesize is 0x%lX\n", (unsigned long long)filesize);
+	//ret = filemax;
+	//return ret;
+	return filesize;
+  }
   if (! grub_open (arg))
     return 0; 
-
+  if (length > filemax)
+      length = filemax;
   filepos = skip;
+  if (replace)
+  {
+	if (! len_r)
+	{
+		Hex = 0;
+        if (*replace == '\"')
+        {
+        for (i = 0; i < 128 && (r[i] = *(++replace)) != '\"'; i++);
+        }else{
+        for (i = 0; i < 128 && (r[i] = *(replace++)) != ' ' && r[i] != '\t'; i++);
+        }
+        r[i] = 0;
+        len_r = parse_string ((char *)r);
+    }
+    else
+      {
+		if (! Hex)
+			Hex = -1ULL;
+      }
+  }
   if (locate)
   {
     if (*locate == '\"')
     {
-      for (i = 0; i < 16 && (s[i] = *(++locate)) != '\"'; i++);
-      len1 = i;
-      s[i] = 0;
+      for (i = 0; i < 128 && (s[i] = *(++locate)) != '\"'; i++);
     }else{
-      for (i = 0; i < 16 && (s[i] = *(locate++)) != ' ' && s[i] != '\t'; i++);
-      len1 = i;
-      s[i] = 0;
+      for (i = 0; i < 128 && (s[i] = *(locate++)) != ' ' && s[i] != '\t'; i++);
     }
+    s[i] = 0;
+    len_s = parse_string ((char *)s);
+    if (len_s == 0 || len_s > 16)
+	return ! (errnum = ERR_BAD_ARGUMENT);
     //j = skip;
-    for (j = skip; j - skip < length && (len = grub_read ((char *)(SCRATCHADDR + 16), 16)); j += 16)
+    grub_memset ((char *)(SCRATCHADDR), 0, 32);
+    for (j = skip; ; j += 16)
     {
-      if (j != skip)
-      for (i = 0; i < 16; i++)
-	if (! grub_memcmp ((char *)&s, (char *)(SCRATCHADDR + i), len1))
-	{
-	  /* print the address */
-	  grub_printf ("%X ", j - 16 + i);
-	  ret++;
-	  //break;
-	}
-      grub_memmove ((char *)SCRATCHADDR, (char *)(SCRATCHADDR + 16), 16);
-      //i = len;
-    }
-      for (i = 0; i < 16; i++)
-	if (! grub_memcmp ((char *)&s, (char *)(SCRATCHADDR + i), len1))
-	{
-	  /* print the address */
-	  grub_printf ("%X ", j - 16 + i);
-	  ret++;
-	  //break;
-	}
+	len = 0;
+	if (j - skip < length)
+	    len = grub_read ((unsigned long long)(SCRATCHADDR + 16), 16, 0xedde0d90);
+	if (len < 16)
+	    grub_memset ((char *)(SCRATCHADDR + 16 + (unsigned long)len), 0, 16 - len);
 
+	if (j != skip)
+	{
+	    for (i = 0; i < 16; i++)
+	    {
+		unsigned long long k = j - 16 + i;
+		if (locate_align == 1 || ! ((unsigned long)k % (unsigned long)locate_align))
+		    if (! grub_memcmp ((char *)&s, (char *)(SCRATCHADDR + (unsigned long)i), len_s))
+		    {
+			/* print the address */
+			if (debug > 0)
+				grub_printf (" %lX", (unsigned long long)k);
+			/* replace strings */
+			if ((replace) && len_r)
+			{
+				unsigned long long filepos_bak;
+
+				filepos_bak = filepos;
+				filepos = k;
+				if (Hex)
+				  {
+                    grub_read (len_r,(Hex == -1ULL)?8:Hex, 0x900ddeed);
+					i = ((Hex == -1ULL)?8:Hex)+i;
+                  }
+				else
+				 {
+	 				/* write len_r bytes at string r to file!! */
+                    grub_read ((unsigned long long)(unsigned int)(char *)&r, len_r, 0x900ddeed);
+                    i = i+len_r;
+                  }
+				i--;
+				filepos = filepos_bak;
+				//if (debug > 0)
+				//	grub_putchar('!');
+			}
+			ret++;
+		    }
+	    }
+	}
+	if (len == 0)
+	    break;
+	grub_memmove ((char *)SCRATCHADDR, (char *)(SCRATCHADDR + 16), 16);
+    }
   }else if (Hex == (++ret))	/* a trick for (ret = 1, Hex == 1) */
   {
-    for (j = skip; j - skip < length && (len = grub_read ((char *)&s, 16)); j += 16)
+    for (j = skip; j - skip < length && (len = grub_read ((unsigned long long)(unsigned long)&s, 16, 0xedde0d90)); j += 16)
     {
-      hexdump(j,(char*)&s,(len>length+skip-j)?(length+skip-j):len);
-      if (quit_print)
-        break;
+	if (debug > 0)
+		hexdump(j,(char*)&s,(len>length+skip-j)?(length+skip-j):len);
+	if (quit_print)
+		break;
     }
   }else
-    for (j = 0; j < length && grub_read ((char *)&c, 1); j++)
+    for (j = 0; j < length && grub_read ((unsigned long long)(unsigned long)&c, 1, 0xedde0d90); j++)
     {
 #if 1
-	grub_putchar (c);
+	if (debug > 0)
+		grub_putchar (c);
 #else
-      /* Because running "cat" with a binary file can confuse the terminal,
-	 print only some characters as they are.  */
-      if (grub_isspace (c) || (c >= ' ' && c <= '~'))
-	grub_putchar (c);
-      else
-	grub_putchar ('?');
+	/* Because running "cat" with a binary file can confuse the terminal,
+	   print only some characters as they are.  */
+	if (grub_isspace (c) || (c >= ' ' && c <= '~'))
+		grub_putchar (c);
+	else
+		grub_putchar ('?');
 #endif
-      if (quit_print)
-	break;
+	if (quit_print)
+		break;
     }
   
   grub_close ();
@@ -1274,7 +1479,7 @@ static struct builtin builtin_cat =
   "cat",
   cat_func,
   BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
-  "cat [--hex] [--skip=S] [--length=L] [--locate=STRING] FILE",
+  "cat [--hex] [--skip=S] [--length=L] [--locate=STRING] [--locate-align=A] FILE",
   "Print the contents of the file FILE, or print the locations "
   "of the string STRING in FILE."
 };
@@ -1290,10 +1495,10 @@ cdrom_func (char *arg, int flags)
     if (grub_memcmp (arg, "--add-io-ports=", 15) == 0)
       {
 	char *p;
-	unsigned long tmp;
+	unsigned long long tmp;
 
 	p = arg + 15;
-	if (! safe_parse_maxint (&p, (int *)(void *)&tmp))
+	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
 	*reg_base_addr_append = tmp;
 	return 1;
@@ -1305,7 +1510,7 @@ cdrom_func (char *arg, int flags)
 	if (atapi_dev_count)
 	{
 	  if (debug > 0)
-	    printf("\nFound %d CD-ROM%s. (Note: Further read could fail if the hardware does not\nfully support ATAPI).\n", atapi_dev_count, atapi_dev_count > 1 ? "s" : "");
+	    printf("\nFound %d CD-ROM%s. (Note: Further read could fail if the hardware does not\nfully support ATAPI).\n", atapi_dev_count, (atapi_dev_count > 1 ? "s" : ""));
 	} else {
 	  if (debug > 0)
 	    printf("\nNo CD-ROMs found. Perhaps the hardware does not fully support ATAPI. If your\nCD-ROM uses unusual I/O ports, please specify them with \"--add-io-ports=P\".\n");
@@ -1346,7 +1551,6 @@ chainloader_func (char *arg, int flags)
 
   int force = 0;
   char *filename;
-//  unsigned long hidden_sectors;
 
   chainloader_load_segment_orig = chainloader_load_segment;
   chainloader_load_offset_orig = chainloader_load_offset;
@@ -1392,82 +1596,98 @@ chainloader_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--load-segment=", 15) == 0)
       {
+	unsigned long long ull;
 	p = arg + 15;
-	if (! safe_parse_maxint (&p, &chainloader_load_segment))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_load_segment < 0 || chainloader_load_segment >= 0xa000)
+	if (ull >= 0xA000)
 	{
 		errnum = ERR_INVALID_LOAD_SEGMENT;
 		goto failure;
 	}
+	chainloader_load_segment = ull;
       }
     else if (grub_memcmp (arg, "--load-offset=", 14) == 0)
       {
+	unsigned long long ull;
 	p = arg + 14;
-	if (! safe_parse_maxint (&p, &chainloader_load_offset))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_load_offset < 0 || chainloader_load_offset > 0xffff)
+	if (ull > 0xF800)
 	{
 		errnum = ERR_INVALID_LOAD_OFFSET;
 		goto failure;
 	}
+	chainloader_load_offset = ull;
       }
     else if (grub_memcmp (arg, "--load-length=", 14) == 0)
       {
+	unsigned long long ull;
 	p = arg + 14;
-	if (! safe_parse_maxint (&p, &chainloader_load_length))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_load_length < 512 || chainloader_load_length > 0xa0000)
+	if (ull < 512 || ull > 0xA0000)
 	{
 		errnum = ERR_INVALID_LOAD_LENGTH;
 		goto failure;
 	}
+	chainloader_load_length = ull;
       }
     else if (grub_memcmp (arg, "--skip-length=", 14) == 0)
       {
+	unsigned long long ull;
 	p = arg + 14;
-	if (! safe_parse_maxint (&p, &chainloader_skip_length))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_skip_length < 0)
-	{
-		errnum = ERR_INVALID_SKIP_LENGTH;
-		goto failure;
-	}
+	//if (chainloader_skip_length < 0)
+	//{
+	//	errnum = ERR_INVALID_SKIP_LENGTH;
+	//	goto failure;
+	//}
+	chainloader_skip_length = ull;
       }
     else if (grub_memcmp (arg, "--boot-cs=", 10) == 0)
       {
+	unsigned long long ull;
 	p = arg + 10;
-	if (! safe_parse_maxint (&p, &chainloader_boot_CS))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_boot_CS < 0 || chainloader_boot_CS > 0xffff)
+	if (ull > 0xffff)
 	{
 		errnum = ERR_INVALID_BOOT_CS;
 		goto failure;
 	}
+	chainloader_boot_CS = ull;
       }
     else if (grub_memcmp (arg, "--boot-ip=", 10) == 0)
       {
+	unsigned long long ull;
 	p = arg + 10;
-	if (! safe_parse_maxint (&p, &chainloader_boot_IP))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
-	if (chainloader_boot_IP < 0 || chainloader_boot_IP > 0xffff)
+	if (ull > 0xffff)
 	{
 		errnum = ERR_INVALID_BOOT_IP;
 		goto failure;
 	}
+	chainloader_boot_IP = ull;
       }
     else if (grub_memcmp (arg, "--ebx=", 6) == 0)
       {
+	unsigned long long ull;
 	p = arg + 6;
-	if (! safe_parse_maxint (&p, (int *)(void *)&chainloader_ebx))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
+	chainloader_ebx = ull;
 	chainloader_ebx_set = 1;
       }
     else if (grub_memcmp (arg, "--edx=", 6) == 0)
       {
+	unsigned long long ull;
 	p = arg + 6;
-	if (! safe_parse_maxint (&p, (int *)(void *)&chainloader_edx))
+	if (! safe_parse_maxint (&p, &ull))
 		goto failure;
+	chainloader_edx = ull;
 	chainloader_edx_set = 1;
       }
     else if (grub_memcmp (arg, "--sdi", 5) == 0)
@@ -1498,12 +1718,12 @@ chainloader_func (char *arg, int flags)
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file, "(%d,%d)%s%s", saved_drive, (char)(saved_partition>>16), saved_dir, arg);
+	grub_sprintf (chainloader_file, "(%d,%d)%s%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), saved_dir, arg);
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file, "(%d,%c)%s%s", saved_drive, (char)(saved_partition>>8) + 'a', saved_dir, arg);
+	  grub_sprintf (chainloader_file, "(%d,%c)%s%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), saved_dir, arg);
 	else
-	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s%s", saved_drive,  (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', saved_dir, arg);
+	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s%s", saved_drive,  (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), saved_dir, arg);
     }
     else
       grub_sprintf (chainloader_file, "(%d)%s%s", saved_drive, saved_dir, arg);
@@ -1513,26 +1733,26 @@ chainloader_func (char *arg, int flags)
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file, "(%d,%d)%s", saved_drive, (char)(saved_partition>>16), arg + 2);
+	grub_sprintf (chainloader_file, "(%d,%d)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (arg + 2));
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file, "(%d,%c)%s", saved_drive, (char)(saved_partition>>8) + 'a', arg + 2);
+	  grub_sprintf (chainloader_file, "(%d,%c)%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), (arg + 2));
 	else
-	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s", saved_drive, (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', arg + 2);
+	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), (arg + 2));
     }
     else
-      grub_sprintf (chainloader_file, "(%d)%s", saved_drive, arg + 2);
+      grub_sprintf (chainloader_file, "(%d)%s", saved_drive, (arg + 2));
   } else if (*arg != '(')
   {
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file, "(%d,%d)%s", saved_drive, (char)(saved_partition>>16), arg);
+	grub_sprintf (chainloader_file, "(%d,%d)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), arg);
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file, "(%d,%c)%s", saved_drive, (char)(saved_partition>>8) + 'a', arg);
+	  grub_sprintf (chainloader_file, "(%d,%c)%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), arg);
 	else
-	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s", saved_drive, (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', arg);
+	  grub_sprintf (chainloader_file, "(%d,%d,%c)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), arg);
     }
     else
       grub_sprintf (chainloader_file, "(%d)%s", saved_drive, arg);
@@ -1566,13 +1786,20 @@ chainloader_func (char *arg, int flags)
   
   if (filename == 0)
 	filename = arg;
-
+  if (current_drive == 0xFFFF || current_drive == ram_drive)
+  {
+	if (! chainloader_edx_set)
+	  {
+		chainloader_edx = saved_drive | ((saved_partition >> 8) & 0xFF00);
+		chainloader_edx_set=1;
+	  }
+  }
 #ifndef GRUB_UTIL
   /* check bootable cdrom */
   if (*filename == 0 || *filename == ' ' || *filename == '\t')
   {
 	//check_bootable_cdrom (current_drive);
-	//unsigned long i;
+	unsigned long i;
 	unsigned long tmp;
 	unsigned short tmp1;
 	unsigned short tmp2;
@@ -1581,8 +1808,6 @@ chainloader_func (char *arg, int flags)
 	tmp = current_drive;
 	/* check bootable type of drive (tmp) */
 
-//grub_printf ("get_diskinfo(0x%X)\n", tmp);
-      
 	/* Get the geometry. This ensures that the drive is present.  */
 	if (get_diskinfo (tmp, &tmp_geom))
 	{
@@ -1590,19 +1815,13 @@ chainloader_func (char *arg, int flags)
 		goto failure;
 	}
 
-//grub_printf ("get_diskinfo ok.\n");
-
 	/* open the drive */
 	
-	grub_sprintf ((char *)SCRATCHADDR, "(0x%X)+0x%X", tmp, tmp_geom.total_sectors);
-
-//grub_printf ("grub_open(%s)\n", SCRATCHADDR);
+	grub_sprintf ((char *)SCRATCHADDR, "(0x%X)+0x%lX", tmp, (unsigned long long)tmp_geom.total_sectors);
 
 	if (! grub_open ((char *)SCRATCHADDR))
 		goto failure;
 	
-//grub_printf ("filemax=%X\n", filemax);
-
 	/****************************************/
 	/* read the EL Torito Volume Descriptor */
 	/****************************************/
@@ -1610,10 +1829,8 @@ chainloader_func (char *arg, int flags)
 	//filemax = 0x12 * 0x800;
 	filepos = 0x11 * 0x800;
 
-	if (grub_read ((char *)SCRATCHADDR, 512) != 512)
+	if (grub_read ((unsigned long long)SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
-
-//grub_printf ("grub_read ok.\n");
 
 	/* check the EL Torito Volume Descriptor */
 
@@ -1630,7 +1847,7 @@ chainloader_func (char *arg, int flags)
 	//filemax = (tmp + 1) * 0x800;
 	filepos = tmp * 0x800;
 	
-	if (grub_read ((char *)SCRATCHADDR, 512) != 512)
+	if (grub_read ((unsigned long long)SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
 	/*******************************/
@@ -1822,7 +2039,7 @@ chainloader_func (char *arg, int flags)
 	tmp2 = *((unsigned short *)((unsigned char *)SCRATCHADDR + 0x22));	/* Load Segment */
 
 	if (debug > 0)
-		printf ("\nLoad segment: 0x%X\t", tmp2);
+		printf ("\nLoad segment: 0x%X\t", (unsigned long)tmp2);
 
 	if (tmp2 == 0)
 		tmp2 = 0x7C0;
@@ -1832,19 +2049,19 @@ chainloader_func (char *arg, int flags)
 	tmp = *((unsigned char *)SCRATCHADDR + 0x24);	/* System Type */
 
 	if (debug > 0)
-		printf ("System Type: 0x%X\t", tmp);
+		printf ("System Type: 0x%X\t", (unsigned long)tmp);
 	
 	i = *((unsigned short *)((unsigned char *)SCRATCHADDR + 0x26));	/* Sector Count */
 
 	if (debug > 0)
-		printf ("Sector Count: 0x%X\n", i);
+		printf ("Sector Count: 0x%X\n", (unsigned long)i);
 
 //	*(unsigned short *)&(chainloader_file[0x0E]) = i;	/* 0E-0F: sector count in 512-byte sectors */
 	
 	tmp = *((unsigned long *)((unsigned char *)SCRATCHADDR + 0x28));	/* Load RBA */
 
 	if (debug > 0)
-		printf ("Load RBA: 0x%X\t", tmp);
+		printf ("Load RBA: 0x%X\t", (unsigned long)tmp);
 
 //	*(unsigned long *)&(chainloader_file[4]) = tmp;		/* 04-07: LBA of the image to be emulated */
 	
@@ -1854,7 +2071,7 @@ chainloader_func (char *arg, int flags)
 		goto failure_exec_format;
 
 	if (debug > 0)
-		printf ("Boot Type: %s\n",
+		printf ("Boot Type: %s\n", 
 			tmp1 == 0 ? "0 = No Emulation" :
 			tmp1 == 1 ? "1 = 1.2M floppy"  :
 			tmp1 == 2 ? "2 = 1.44M floppy" :
@@ -1869,7 +2086,7 @@ chainloader_func (char *arg, int flags)
 		if (buf_geom.sector_size != 2048)
 			goto failure_exec_format;
 		//kernel_type = KERNEL_TYPE_CHAINLOADER;
-		sprintf (chainloader_file, "(%d)%d+%d", current_drive, tmp, (i + 3) / 4);
+		sprintf (chainloader_file, "(%d)%d+%d", current_drive, tmp, (unsigned long)((i + 3) / 4));
 		chainloader_load_segment = tmp2;//0x0000;
 		chainloader_load_offset = 0;//0x7c00;
 		chainloader_load_length = i * 512;//0x200;
@@ -1913,28 +2130,49 @@ chainloader_func (char *arg, int flags)
 	
 	/* we cannot use SCRATCHADDR because map_func and geometry_func may
 	 * use it. So we use 1 sector below 0x2B0000 instead. */
-	if (grub_read ((char *)(HMA_ADDR - 0x200), 512) != 512)
+	if (grub_read ((unsigned long long)(HMA_ADDR - 0x200), 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
-	if (tmp1 == 4)
 	{
-		if (probe_mbr ((struct master_and_dos_boot_sector *)(HMA_ADDR - 0x200), 0, 1, 0))
-		{
-			errnum = ERR_BAD_PART_TABLE;
-			goto failure_exec_format;
-		}
-	} else {
-		if (probe_bpb((struct master_and_dos_boot_sector *)(HMA_ADDR - 0x200)))
-		{
-			probed_total_sectors = (tmp1 == 1 ? 2400 : tmp1 == 2 ? 2880 : 5760);
-		}
-	}
+		unsigned long heads = 0;
+		unsigned long sects = 0;
 
-	/* map the image */
-	sprintf (chainloader_file, "--read-only --heads=0 --sectors-per-track=0 (%d)%d+%d (%d)", current_drive,
-			tmp,
-			(probed_total_sectors + 3) / 4, //0x3FFFFFFF,
-			(tmp1 == 4) ? 0x80 : 0x00);
+		if (tmp1 == 4)
+		{
+			int err;
+			if ((err = probe_mbr ((struct master_and_dos_boot_sector *)(HMA_ADDR - 0x200), 0, 1, 0)))
+			{
+				if (debug > 0)
+					printf ("Warning! Partition table of HD image is faulty(err=%d).\n", err);
+				sects = (*(unsigned char *)(HMA_ADDR - 0x200 + 0x1C4)) & 0x3F;
+				probed_total_sectors = *(unsigned long *)(HMA_ADDR - 0x200 + 0x1CA);
+				if (sects < 2 || probed_total_sectors < 5)
+				{
+					errnum = ERR_BAD_PART_TABLE;
+					goto failure_exec_format;
+				}
+				heads = *(unsigned char *)(HMA_ADDR - 0x200 + 0x1C3);
+				//if (heads < 255)
+					heads++;
+				if (debug > 0)
+					printf ("Use Heads=%d, SectorsPerTrack=%d, TotalSectors=%ld for HD emulation.\n", heads, sects, (unsigned long long)probed_total_sectors);
+			}
+		} else {
+			if (probe_bpb((struct master_and_dos_boot_sector *)(HMA_ADDR - 0x200)))
+			{
+				probed_total_sectors = (tmp1 == 1 ? 2400 : tmp1 == 2 ? 2880 : 5760);
+			}
+		}
+
+		/* map the image */
+		sprintf (chainloader_file, "--read-only --heads=%d --sectors-per-track=%d (%d)%d+%d (%d)",
+				(unsigned long)heads,
+				(unsigned long)sects,
+				(unsigned long)current_drive,
+				(unsigned long)tmp,
+				(unsigned long)((probed_total_sectors + 3) / 4), //0x3FFFFFFF,
+				(unsigned long)((tmp1 == 4) ? 0x80 : 0x00));
+	}
 
 	tmp = ( (tmp1 == 4) ? (*(char *)0x475) : ((*(char*)0x410) & 1) );
 
@@ -1951,7 +2189,7 @@ chainloader_func (char *arg, int flags)
 	/* move the former fd0 or hd0 up. */
 	if (tmp)
 	{
-		sprintf (chainloader_file, "(%d) (%d)", (tmp1 == 4) ? 0x80 : 0x00, (tmp1 == 4) ? (0x80 + tmp) : 0x01);
+		sprintf (chainloader_file, "(%d) (%d)", (unsigned long)((tmp1 == 4) ? 0x80 : 0x00), (unsigned long)((tmp1 == 4) ? (0x80 + tmp) : 0x01));
 
 		map_func (chainloader_file, flags);
 
@@ -1978,7 +2216,7 @@ chainloader_func (char *arg, int flags)
 	buf_track = -1;
 
         grub_memmove ((char *)0x7C00, (char *)(HMA_ADDR - 0x200), 512);
-	sprintf (chainloader_file, "(%d)+1", (tmp1 == 4) ? 0x80 : 0x00);
+	sprintf (chainloader_file, "(%d)+1", (unsigned long)((tmp1 == 4) ? 0x80 : 0x00));
 
 	chainloader_load_segment = 0;//tmp2;
 	chainloader_load_offset = 0x7c00;
@@ -1998,29 +2236,16 @@ chainloader_func (char *arg, int flags)
   }
 #endif /* ! GRUB_UTIL */
 
-//  if (debug > 0)
-//	printf ("Debug: chainloader_func: grub_open(%s)...", arg);
-
   /* Open the file.  */
   grub_open (arg);
-
-//  if (debug > 0)
-//	/* wipe out debug message. */
-//	printf ("\r                                                                             \r");
 
   if (errnum)
 	goto failure;
 
-//  if (debug > 0)
-//	printf ("Debug: chainloader_func: grub_read(512 bytes)...");
-
   /* Read the first block.  */
   {
     unsigned long len;
-    len = grub_read ((char *) SCRATCHADDR, 512);
-//    if (debug > 0)
-//	/* wipe out debug message. */
-//	printf ("\r                                                                             \r");
+    len = grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90);
 
     if (len != 512)
 	goto failure_exec_format;
@@ -2031,7 +2256,6 @@ chainloader_func (char *arg, int flags)
 	errnum = ERR_INVALID_SKIP_LENGTH;
 	goto failure_exec_format;
   }
-//  hidden_sectors = part_start;
   
   if (*((long *)SCRATCHADDR) == 0x49445324 /* $SDI */)
     {
@@ -2064,25 +2288,25 @@ chainloader_func (char *arg, int flags)
 	 */
 	
 	if ((chainloader_ebx & 0xFF00) == 0xFF00) /* check if partition number == 0xFF */
-		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (chainloader_ebx & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (unsigned long)(unsigned char)chainloader_ebx);
 	else
-		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (chainloader_ebx & 0xff), ((chainloader_ebx >> 8) & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (unsigned long)(unsigned char)chainloader_ebx, (unsigned long)(unsigned char)(chainloader_ebx >> 8));
 
 	if (! grub_open ((char *)SCRATCHADDR))
 		goto failure;
 	
 	/* Read the boot sector of the partition onto 0000:7C00  */
-	if (grub_read ((char *) SCRATCHADDR, 512) != 512)
+	if (grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
 	/* modify the hidden sectors */
 	/* FIXME: Does the boot drive number also need modifying? */
 	
 	if (*((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)))
-	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = part_start;
+	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = (unsigned long)part_start;
 	if (debug > 0)
-	  grub_printf("Will boot FreeDOS from drive=0x%x, partition=0x%x(hidden sectors=0x%x)\n",
-			current_drive/*(chainloader_ebx & 0x80)*/, ((current_partition >> 16) & 0xff), part_start);
+	  grub_printf("Will boot FreeDOS from drive=0x%x, partition=0x%x(hidden sectors=0x%lx)\n",
+			current_drive, (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long long)part_start);
     }
   else
   if (*(short *)SCRATCHADDR == 0x5A4D && filemax > 0x10000 &&
@@ -2093,7 +2317,7 @@ chainloader_func (char *arg, int flags)
       int err;
       
       /* Read the second sector.  */
-      if (grub_read ((char *) SCRATCHADDR, 512) != 512)
+      if (grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
       err = (*(short *)SCRATCHADDR != 0x4A42);
@@ -2101,14 +2325,14 @@ chainloader_func (char *arg, int flags)
       filepos += 0x200;	/* skip the third sector */
       
       /* Read the fourth sector.  */
-      if (grub_read ((char *) SCRATCHADDR, 512) != 512)
+      if (grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
       err |= (*((unsigned short *) (SCRATCHADDR + BOOTSEC_SIG_OFFSET)) != 0x534D);
 
       /* Read the fifth sector.
        * check the compress signature "CM" of IO.SYS of WinME */
-      if (grub_read ((char *) SCRATCHADDR, 512) != 512)
+      if (grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
       if (! err)
@@ -2159,15 +2383,15 @@ chainloader_func (char *arg, int flags)
 	 */
 	
 	if ((chainloader_edx & 0xFF0000) == 0xFF0000) /* check if partition number == 0xFF */
-		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (chainloader_edx & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (unsigned long)(unsigned char)chainloader_edx);
 	else
-		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (chainloader_edx & 0xff), ((chainloader_edx >> 16) & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (unsigned long)(unsigned char)chainloader_edx, (unsigned long)(unsigned char)(chainloader_edx >> 16));
 
 	if (! grub_open ((char *)SCRATCHADDR))
 		goto failure;
 	
 	/* Read the boot sector of the partition onto 0000:7C00  */
-	if (grub_read ((char *) SCRATCHADDR, 512) != 512)
+	if (grub_read ((unsigned long long) SCRATCHADDR, 512, 0xedde0d90) != 512)
 		goto failure_exec_format;
 
 	is_io = 1;
@@ -2175,18 +2399,17 @@ chainloader_func (char *arg, int flags)
 	/* FIXME: Does the boot drive number also need modifying? */
 	
 	if (*((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)))
-	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = part_start;
+	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = (unsigned long)part_start;
 	if (debug > 0)
-	  grub_printf("Will boot MS-DOS %c.x from drive=0x%x, partition=0x%x(hidden sectors=0x%x)\n",
-			((*(unsigned short *) SCRATCHADDR) == 0x4D43)? '8' : '7',
-			current_drive/*(chainloader_edx & 0x80)*/, ((current_partition >> 16) & 0xff), part_start);
+	  grub_printf("Will boot MS-DOS %c.x from drive=0x%x, partition=0x%x(hidden sectors=0x%lx)\n",
+			(unsigned long)(((*(unsigned short *) SCRATCHADDR) == 0x4D43)? '8' : '7'),
+			(unsigned long)current_drive, (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long long)part_start);
       }
     }
   else
   if (((*(long *)SCRATCHADDR) & 0x00FF00FF) == 0x000100E9 && filemax > 0x30000 &&
        (*((unsigned short *) (SCRATCHADDR + BOOTSEC_SIG_OFFSET)) != BOOTSEC_SIGNATURE))
     {
-//grub_printf("current_drive=0x%x, current_partition=0x%x(part_start=0x%x)\n", current_drive, current_partition, part_start);
 	if (chainloader_load_segment == -1)
 		chainloader_load_segment = 0x2000;
 	if (chainloader_load_offset == -1)
@@ -2202,35 +2425,34 @@ chainloader_func (char *arg, int flags)
 	grub_close ();
 	
 	if ((chainloader_edx & 0xFF00) == 0xFF00)
-		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (chainloader_edx & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d)+1", (unsigned long)(unsigned char)chainloader_edx);
 	else
-		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (chainloader_edx & 0xff), ((chainloader_edx >> 8) & 0xff));
+		grub_sprintf ((char *)SCRATCHADDR, "(%d,%d)+1", (unsigned long)(unsigned char)chainloader_edx, (unsigned long)(unsigned char)(chainloader_edx >> 8));
 
 	if (! grub_open ((char *)SCRATCHADDR))
 		goto failure;
 	
 	/* Read the boot sector of the partition onto 0000:7C00  */
-	if (grub_read ((char *) SCRATCHADDR, SECTOR_SIZE) != SECTOR_SIZE)
+	if (grub_read ((unsigned long long) SCRATCHADDR, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
 		goto failure_exec_format;
 
-//grub_printf("current_drive=0x%x, current_partition=0x%x(part_start=0x%x)\n", current_drive, current_partition, part_start);
 	/* modify the hidden sectors */
 	/* FIXME: Does the boot drive number also need modifying? */
 	
 	if (*((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)))
-	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = part_start;
+	    *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)) = (unsigned long)part_start;
 	if (debug > 0)
-	  grub_printf("Will boot NTLDR from drive=0x%x, partition=0x%x(hidden sectors=0x%x)\n", current_drive, ((current_partition >> 16) & 0xff), part_start);
+	  grub_printf("Will boot NTLDR from drive=0x%x, partition=0x%x(hidden sectors=0x%lx)\n", current_drive, (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long long)part_start);
     }
   else
-  if (filemax > 0x8000 && (*(short *)SCRATCHADDR) == 0x3EEB && (*(long *)(SCRATCHADDR + 0x40)) == 0x5B0000E8 &&
+  if (filemax >= 0x4000 && (*(short *)SCRATCHADDR) == 0x3EEB && //(*(long *)(SCRATCHADDR + 0x40)) == 0x5B0000E8 &&
        (*((unsigned short *) (SCRATCHADDR + BOOTSEC_SIG_OFFSET)) != BOOTSEC_SIGNATURE))
     {
 	char tmp_buf[16];
 
 	filepos = 0x1FF8;	/* grldr signature, pre_stage2, etc */
       
-	if (grub_read (tmp_buf, 16) != 16)
+	if (grub_read ((unsigned long long)(unsigned long)tmp_buf, 16, 0xedde0d90) != 16)
 		goto failure_exec_format;
 
 	filepos = 0x200;
@@ -2259,18 +2481,27 @@ chainloader_func (char *arg, int flags)
 	grub_close ();
 	
 	if (debug > 0)
-	  grub_printf("Will boot GRLDR from drive=0x%x, partition=0x%x(hidden sectors=0x%x)\n", current_drive, ((current_partition >> 16) & 0xff), part_start);
+	  grub_printf("Will boot GRLDR from drive=0x%x, partition=0x%x(hidden sectors=0x%lx)\n", current_drive, (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long long)part_start);
     }
   else
     {
 check_isolinux:
-      if (((*(long long *)SCRATCHADDR) & 0xFFFFFFFFFFFFLL) == 0x7C40EAFALL && filemax > 0x2000 && filemax < 0x20000 &&
-           (*((unsigned short *) (SCRATCHADDR + 0x40)) == 0x892E) &&
-           (*((unsigned short *) (SCRATCHADDR + 0x45)) == 0x8C2E) &&
-           (*((unsigned long *) (SCRATCHADDR + 0x4A)) == 0xD08EC031) &&
-           (*((unsigned long *) (SCRATCHADDR + 0x4E)) == 0x8E7BD4BC)
-         )
+      if (((*(long long *)SCRATCHADDR) & 0xFFFFFFFFFF00FFFFLL) == 0x909000007C00EAFALL && filemax > 0x2000 && filemax < 0x20000)
 	{
+		for (p = (char *)(SCRATCHADDR + 0x40); p < (char *)(SCRATCHADDR + 0x140); p++)
+		{
+			if (*(unsigned long *)p == 0xD08EC031 &&
+				*(unsigned short *)(p - 10) == 0x892E &&
+				*(unsigned short *)(p - 5) == 0x8C2E &&
+				*(unsigned char *)(p + 4) == 0xBC &&
+				*(unsigned char *)(p - 8) == 0x26 &&
+				*(unsigned char *)(p - 3) == 0x16)
+			{
+				goto isolinux_ok;
+			}
+		}
+		goto check_signature;	/* it is not isolinux. */
+isolinux_ok:
 	    if (buf_geom.sector_size != 2048)
 	    {
 		if (debug > 0)
@@ -2287,11 +2518,14 @@ check_isolinux:
 	    is_isolinux = 1;
 	}
       else
-      /* If not loading it forcibly, check for the signature.  */
-      if (! force
-	    && (*((unsigned short *) (SCRATCHADDR + BOOTSEC_SIG_OFFSET))
+	{
+check_signature:
+	    /* If not loading it forcibly, check for the signature.  */
+	    if (! force
+		&& (*((unsigned short *) (SCRATCHADDR + BOOTSEC_SIG_OFFSET))
 		!= BOOTSEC_SIGNATURE))
-	goto failure_exec_format;
+		goto failure_exec_format;
+	}
     }
 
   grub_close ();
@@ -2300,7 +2534,7 @@ check_isolinux:
   if (! probe_bpb((struct master_and_dos_boot_sector *)SCRATCHADDR))
     if (*((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS)))
         *((unsigned long *) (SCRATCHADDR + BOOTSEC_BPB_HIDDEN_SECTORS))
-          = part_start;
+          = (unsigned long)part_start;
 
   if (chainloader_load_length == -1)
 	  chainloader_load_length = filemax;
@@ -2379,10 +2613,30 @@ cmp_func (char *arg, int flags)
   char *file1, *file2;
   /* The addresses.  */
   char *addr1, *addr2;
-  //int i;
+  int i, Hex;
   /* The size of the file.  */
-  int size;
+  unsigned long long size;
+  unsigned long long cur_pos = 0;
+    quit_print=0;
+    Hex = 0;
 
+  for (;;)
+  {
+		if (grub_memcmp (arg, "--hex", 5) == 0)
+		{
+			Hex = 1;
+			arg=skip_to (0, arg);
+		}
+		else if (grub_memcmp (arg, "--skip=", 7) == 0)
+		{
+			arg += 7;
+			if (! safe_parse_maxint_with_suffix (&arg, &cur_pos, 0))
+				return 0;
+		  while (*arg == ' ' || *arg == '\t') arg++;
+		}
+		else
+			break;
+   }
   /* Get the filenames from ARG.  */
   file1 = arg;
   file2 = skip_to (0, arg);
@@ -2397,55 +2651,160 @@ cmp_func (char *arg, int flags)
   nul_terminate (file2);
 
   /* Read the whole data from FILE1.  */
-  addr1 = (char *) RAW_ADDR (0x400000);
+  #define CMP_BUF_SIZE 0x100000ULL
+  addr1 = (char *) RAW_ADDR (0x600000);
+  addr2 = addr1 + CMP_BUF_SIZE;
   if (! grub_open (file1))
     return 0;
   
   /* Get the size.  */
   size = filemax;
-  if (grub_read (addr1, -1) != size)
-    {
-      grub_close ();
-      return 0;
-    }
-  
-  grub_close ();
-
-  /* Read the whole data from FILE2.  */
-  addr2 = addr1 + size;
+  grub_close();
+ 
   if (! grub_open (file2))
     return 0;
+  grub_close();
 
-  /* Check if the size of FILE2 is equal to the one of FILE2.  */
-  if (size != filemax)
+  if ((size != filemax) && !Hex)
     {
-      grub_printf ("Differ in size: 0x%x [%s], 0x%x [%s]\n",
-		   size, file1, filemax, file2);
+      grub_printf ("Differ in size: 0x%lx [%s], 0x%lx [%s]\n", size, file1, filemax, file2);
       grub_close ();
       return 0;
     }
+    
+  if (Hex)
+  {
+	if (current_term->setcolorstate)
+		current_term->setcolorstate (COLOR_STATE_HEADING);
+		
+	grub_printf("Compare FILE1:%s <--> FILE2:%s\t\n",file1,file2);
+	
+	if (current_term->setcolorstate)
+		current_term->setcolorstate (COLOR_STATE_STANDARD);
+  }
   
-  if (! grub_read (addr2, -1))
-    {
-      grub_close ();
-      return 0;
-    }
-  
-  grub_close ();
-
-  /* Now compare ADDR1 with ADDR2.  */
-  for (i = 0; i < size; i++)
-    {
-      if (addr1[i] != addr2[i])
-      {
-	grub_printf ("Differ at the offset %d: 0x%x [%s], 0x%x [%s]\n",
-		     i, (unsigned) addr1[i], file1,
-		     (unsigned) addr2[i], file2);
+ 
+  if (! grub_open (file1))
 	return 0;
-      }
-    }
+
+  unsigned long long size1, size2;
   
-  return 1;
+  if (Hex)
+	filepos = cur_pos & -16ULL;
+  else
+    filepos = cur_pos;
+
+  while ((size1 = grub_read ((unsigned long long)(unsigned long)addr1, CMP_BUF_SIZE, 0xedde0d90)))
+  {
+  		cur_pos = filepos;
+		grub_close();
+		if (! grub_open (file2))
+			return 0;
+		
+		filepos = cur_pos - size1;
+		if (! (size2 = grub_read ((unsigned long long)(unsigned long)addr2, size1, 0xedde0d90)))
+		{
+			grub_close ();
+			return 0;
+		}
+		grub_close();
+		
+		if (Hex)
+		{
+			for (i = 0; i < size2; i+=16)
+			{
+				int k,cnt;
+				unsigned char c;
+				unsigned long cur_offset;
+				cur_offset = (unsigned long)(cur_pos - size1 + i);
+				if (current_term->setcolorstate)
+					current_term->setcolorstate (COLOR_STATE_NORMAL);
+				grub_printf("0x%X\t0x%lX/0x%lX\n",cur_offset, size, filemax);
+				if (current_term->setcolorstate)
+					current_term->setcolorstate (COLOR_STATE_STANDARD);
+				grub_printf ("%08X: ",cur_offset);
+				cnt = 16;
+				if (cnt+i > size2)
+					cnt=size2 - i;
+				for (k=0;k<cnt;k++)
+				{
+					c = (unsigned char)(addr1[i+k]);
+					if ((addr1[i+k] != addr2[i+k]) && (current_term->setcolorstate))
+						current_term->setcolorstate (COLOR_STATE_HIGHLIGHT);
+					printf("%02X", c);
+					if ((addr1[i+k] != addr2[i+k]) && (current_term->setcolorstate))
+						current_term->setcolorstate (COLOR_STATE_STANDARD);
+					if ((k != 15) && ((k & 3)==3))
+						printf(" ");
+					printf(" ");
+				}
+				for (;k<16;k++)
+				{
+					printf("   ");
+					if ((k!=15) && ((k & 3)==3))
+						printf(" ");
+				}
+				printf("; ");
+
+				for (k=0;k<cnt;k++)
+				{
+					c=(unsigned char)(addr1[i+k]);
+					printf("%c",((c>=32) && (c != 127))?c:'.');
+				}
+				printf("\n");
+				grub_printf ("%08X: ",cur_offset);
+				for (k=0;k<cnt;k++)
+				{
+					c = (unsigned char)(addr2[i+k]);
+					if ((addr1[i+k] != addr2[i+k]) && (current_term->setcolorstate))
+						current_term->setcolorstate (COLOR_STATE_HIGHLIGHT);
+					printf("%02X", c);
+					if ((addr1[i+k] != addr2[i+k]) && (current_term->setcolorstate))
+						current_term->setcolorstate (COLOR_STATE_STANDARD);
+					if ((k!=15) && ((k & 3)==3))
+						printf(" ");
+					printf(" ");
+				}
+
+				for (;k<16;k++)
+				{
+					printf("   ");
+					if ((k!=15) && ((k & 3)==3))
+						printf(" ");
+				}
+				printf("; ");
+
+				for (k=0;k<cnt;k++)
+				{
+					c = (unsigned char)(addr2[i+k]);
+					printf("%c",((c>=32) && (c != 127))?c:'.');
+				}
+				printf("\n");
+				if (quit_print)
+					return 1;
+			}
+		}
+		else
+		{
+			  /* Now compare ADDR1 with ADDR2.  */
+			for (i = 0; i < size2; i++)
+			{
+				if (addr1[i] != addr2[i])
+				{
+					grub_printf ("Differ at the offset %d: 0x%x [%s], 0x%x [%s]\n",
+						(unsigned long)(cur_pos - size1 + i), (unsigned long) addr1[i], file1,
+						(unsigned long) addr2[i], file2);
+					return 0;
+				}
+			}
+		}
+		
+		if (! grub_open (file1))
+			return 0;	
+		filepos = cur_pos;
+  }
+	grub_close();
+	return 1;
 }
 
 static struct builtin builtin_cmp =
@@ -2453,7 +2812,7 @@ static struct builtin builtin_cmp =
   "cmp",
   cmp_func,
   BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
-  "cmp FILE1 FILE2",
+  "cmp [--hex] FILE1 FILE2",
   "Compare the file FILE1 with the FILE2 and inform the different values"
   " if any."
 };
@@ -2480,14 +2839,16 @@ static char *color_list[16] =
 };
 
 static int color_number (char *str);
+int blinking = 1;
   
   /* Convert the color name STR into the magical number.  */
 static int
 color_number (char *str)
 {
       char *ptr;
-      //int i;
+      int i;
       int color = 0;
+      int tmp_blinking = blinking;
       
       /* Find the separator.  */
       for (ptr = str; *ptr && *ptr != '/'; ptr++)
@@ -2504,6 +2865,9 @@ color_number (char *str)
 	 in COLOR.  */
       if (substring ("blink-", str, 0) <= 0)
 	{
+	  if (tmp_blinking == 0)
+		return -1;
+	  tmp_blinking = 0x80;
 	  color = 0x80;
 	  str += 6;
 	}
@@ -2523,16 +2887,23 @@ color_number (char *str)
       nul_terminate (str);
 
       /* Search for the color name.  */      
-      for (i = 0; i < 8; i++)
+      for (i = 0; i < 16; i++)
 	if (grub_strcmp (color_list[i], str) == 0)
 	  {
+	    if (i >= 8)
+	    {
+		if (tmp_blinking == 0x80)
+			return -1;
+		tmp_blinking = 0;
+	    }
 	    color |= i << 4;
 	    break;
 	  }
 
-      if (i == 8)
+      if (i == 16)
 	return -1;
 
+      blinking = tmp_blinking;
       return color;
 }
 
@@ -2545,31 +2916,83 @@ color_func (char *arg, int flags)
 {
   char *normal;
   char *highlight;
-  int new_normal_color;
-  int new_highlight_color;
+  char *helptext;
+  char *heading;
+  unsigned long long new_normal_color;
+  unsigned long long new_highlight_color;
+  unsigned long long new_helptext_color;
+  unsigned long long new_heading_color;
       
+  blinking = 1;
   normal = arg;
   highlight = skip_to (0, arg);
+  helptext = skip_to (0, highlight);
+  heading = skip_to (0, helptext);
 
-  new_normal_color = color_number (normal);
-  if (new_normal_color < 0 && ! safe_parse_maxint (&normal, &new_normal_color))
+  new_normal_color = (unsigned long long)(long long)color_number (normal);
+  if ((long long)new_normal_color < 0 && ! safe_parse_maxint (&normal, &new_normal_color))
     return 0;
   
+  if (new_normal_color & 0xFF00)	/* disable blinking */
+	blinking = 0;
+  new_helptext_color = new_normal_color;
+  new_heading_color = new_normal_color;
   /* The second argument is optional, so set highlight_color
      to inverted NORMAL_COLOR.  */
   if (! *highlight)
-    new_highlight_color = ((new_normal_color >> 4)
+    new_highlight_color = (((new_normal_color >> 4) & 0xf)
 			   | ((new_normal_color & 0xf) << 4));
   else
     {
-      new_highlight_color = color_number (highlight);
-      if (new_highlight_color < 0
+      new_highlight_color = (unsigned long long)(long long)color_number (highlight);
+      if ((long long)new_highlight_color < 0
 	  && ! safe_parse_maxint (&highlight, &new_highlight_color))
 	return 0;
+      if (new_highlight_color & 0xFF00)	/* disable blinking */
+      {
+	if (blinking == 0x80)
+	{
+		errnum = ERR_BAD_ARGUMENT;
+		return 0;
+	}
+	blinking = 0;
+      }
+      if (*helptext)
+      {
+	new_helptext_color = (unsigned long long)(long long)color_number (helptext);
+	if ((long long)new_helptext_color < 0
+	    && ! safe_parse_maxint (&helptext, &new_helptext_color))
+		return 0;
+	if (new_helptext_color & 0xFF00)	/* disable blinking */
+	{
+		if (blinking == 0x80)
+		{
+			errnum = ERR_BAD_ARGUMENT;
+			return 0;
+		}
+		blinking = 0;
+	}
+	if (*heading)
+	{
+		new_heading_color = (unsigned long long)(long long)color_number (heading);
+		if ((long long)new_heading_color < 0
+		    && ! safe_parse_maxint (&heading, &new_heading_color))
+			return 0;
+		if (new_heading_color & 0xFF00)	/* disable blinking */
+		{
+			if (blinking == 0x80)
+			{
+				errnum = ERR_BAD_ARGUMENT;
+				return 0;
+			}
+			blinking = 0;
+		}
+	}
+      }
     }
 
   if (current_term->setcolor)
-    current_term->setcolor (new_normal_color, new_highlight_color);
+    current_term->setcolor (new_normal_color, new_highlight_color, new_helptext_color, new_heading_color);
   
   return 1;
 }
@@ -2579,17 +3002,17 @@ static struct builtin builtin_color =
   "color",
   color_func,
   BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_MENU | BUILTIN_HELP_LIST,
-  "color NORMAL [HIGHLIGHT]",
+  "color NORMAL [HIGHLIGHT [HELPTEXT [HEADING]]]",
   "Change the menu colors. The color NORMAL is used for most"
   " lines in the menu, and the color HIGHLIGHT is used to highlight the"
   " line where the cursor points. If you omit HIGHLIGHT, then the"
-  " inverted color of NORMAL is used for the highlighted line."
+  " inverted color of NORMAL is used for the highlighted line. If you"
+  " omit HELPTEXT and/or HEADING, then NORMAL is used."
   " The format of a color is \"FG/BG\". FG and BG are symbolic color names."
   " A symbolic color name must be one of these: black, blue, green,"
   " cyan, red, magenta, brown, light-gray, dark-gray, light-blue,"
   " light-green, light-cyan, light-red, light-magenta, yellow and white."
-  " But only the first eight names can be used for BG. You can prefix"
-  " \"blink-\" to FG if you want a blinking foreground color."
+  " You can prefix \"blink-\" to FG if you want a blinking foreground color."
 };
 
 
@@ -2599,11 +3022,14 @@ configfile_func (char *arg, int flags)
 {
   char *new_config = config_file;
 
+#ifndef GRUB_UTIL
 	if (*arg == 0 && *config_file && pxe_restart_config == 0)
 	{
-		pxe_restart_config = 1;
+		if (configfile_in_menu_init == 0)
+			pxe_restart_config = configfile_in_menu_init = 1;
 		return 1;
 	}
+#endif /* ! GRUB_UTIL */
 
   if (grub_strlen(saved_dir) + grub_strlen(arg) + 20 >= sizeof(chainloader_file_orig))
 	return ! (errnum = ERR_WONT_FIT);
@@ -2613,12 +3039,12 @@ configfile_func (char *arg, int flags)
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file_orig, "(%d,%d)%s%s", saved_drive, (char)(saved_partition>>16), saved_dir, arg);
+	grub_sprintf (chainloader_file_orig, "(%d,%d)%s%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), saved_dir, arg);
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s%s", saved_drive, (char)(saved_partition>>8) + 'a', saved_dir, arg);
+	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), saved_dir, arg);
 	else
-	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s%s", saved_drive,  (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', saved_dir, arg);
+	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), saved_dir, arg);
     }
     else
       grub_sprintf (chainloader_file_orig, "(%d)%s%s", saved_drive, saved_dir, arg);
@@ -2628,26 +3054,26 @@ configfile_func (char *arg, int flags)
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file_orig, "(%d,%d)%s", saved_drive, (char)(saved_partition>>16), arg + 2);
+	grub_sprintf (chainloader_file_orig, "(%d,%d)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (arg + 2));
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s", saved_drive, (char)(saved_partition>>8) + 'a', arg + 2);
+	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), (arg + 2));
 	else
-	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s", saved_drive, (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', arg + 2);
+	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), (arg + 2));
     }
     else
-      grub_sprintf (chainloader_file_orig, "(%d)%s", saved_drive, arg + 2);
+      grub_sprintf (chainloader_file_orig, "(%d)%s", saved_drive, (arg + 2));
   } else if (*arg != '(')
   {
     if (saved_partition != 0xFFFFFF)
     {
       if ((saved_partition & 0xFF00) == 0xFF00)
-	grub_sprintf (chainloader_file_orig, "(%d,%d)%s", saved_drive, (char)(saved_partition>>16), arg);
+	grub_sprintf (chainloader_file_orig, "(%d,%d)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), arg);
       else
 	if ((saved_partition & 0xFF0000) == 0xFF0000)
-	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s", saved_drive, (char)(saved_partition>>8) + 'a', arg);
+	  grub_sprintf (chainloader_file_orig, "(%d,%c)%s", saved_drive, (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), arg);
 	else
-	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s", saved_drive, (char)(saved_partition>>16), (char)(saved_partition>>8) + 'a', arg);
+	  grub_sprintf (chainloader_file_orig, "(%d,%d,%c)%s", saved_drive, (unsigned long)(unsigned char)(saved_partition>>16), (unsigned long)(unsigned char)((saved_partition>>8) + 'a'), arg);
     }
     else
       grub_sprintf (chainloader_file_orig, "(%d)%s", saved_drive, arg);
@@ -2673,8 +3099,21 @@ configfile_func (char *arg, int flags)
   if (! grub_open (arg))
     return 0;
 
-  grub_close ();
+#ifndef GRUB_UTIL
+  if (current_drive == cdrom_drive)
+	configfile_opened = 1;
+  else
+#endif /* ! GRUB_UTIL */
+	grub_close ();
   
+//#ifndef GRUB_UTIL
+//	if (pxe_restart_config == 0)
+//	{
+//		if (configfile_in_menu_init)
+//			return 1;
+//	}
+//#endif /* ! GRUB_UTIL */
+
   /* Copy ARG to CONFIG_FILE.  */
   while ((*new_config++ = *arg++) != 0)
     ;
@@ -2684,34 +3123,45 @@ configfile_func (char *arg, int flags)
   use_config_file = 1;
 //#endif
 
+#ifndef GRUB_UTIL
 	if (pxe_restart_config == 0)
 	{
-		pxe_restart_config = 1;
+		pxe_restart_config = /* configfile_in_menu_init = */ 1;
 		return 1;
 	}
+#endif /* ! GRUB_UTIL */
 
   /* Make sure that the user will not be authoritative.  */
   auth = 0;
   
+  saved_entryno = 0;
+  //force_cdrom_as_boot_device = 0;
+  boot_drive = (current_drive == 0xFFFF ? saved_drive : current_drive);
+  install_partition = (current_drive == 0xFFFF ? saved_partition : current_partition);
+#ifdef GRUB_UTIL
   buf_drive = -1;	/* invalidate disk cache. */
   buf_track = -1;	/* invalidate disk cache. */
-  saved_entryno = 0;
-  force_cdrom_as_boot_device = 0;
-  boot_drive = current_drive;
-  install_partition = current_partition;
   current_drive = GRUB_INVALID_DRIVE;
   current_partition = 0xFFFFFF;
   fsys_type = NUM_FSYS;
   boot_part_addr = 0;
   current_slice = 0;
-#ifdef GRUB_UTIL
   /* Restart cmain.  */
   grub_longjmp (restart_env, 0);
 #else
-  /* Restart pre_stage2.  */
-  (*(char *)0x8205) |= 2;	/* disable keyboard intervention */
-  chain_stage1(0, 0x8200, boot_part_addr);
+  ///* Restart pre_stage2.  */
+  //(*(char *)0x8205) |= 2;	/* disable keyboard intervention */
+  //chain_stage1(0, 0x8200, boot_part_addr);
+  /* Restart cmain.  */
+  asm volatile ("movl $0x7000, %esp");	/* set stack to STACKOFF */
+#ifdef HAVE_ASM_USCORE
+  asm volatile ("call _cmain");
+  asm volatile ("jmp _stop");
+#else
+  asm volatile ("call cmain");
+  asm volatile ("jmp stop");
 #endif
+#endif /* ! GRUB_UTIL */
 
   /* Never reach here.  */
   return 1;
@@ -2727,11 +3177,511 @@ static struct builtin builtin_configfile =
 };
 
 
+#ifndef GRUB_UTIL
+/* dd if=IF of=OF */
+static int
+dd_func (char *arg, int flags)
+{
+  char *p;
+  char *in_file = NULL, *out_file = NULL;
+  unsigned long long bs = 0;
+  unsigned long long count = 0;
+  unsigned long long skip = 0;
+  unsigned long long seek = 0;
+  unsigned long long old_part_start = part_start;
+  unsigned long long old_part_length = part_length;
+//  int in_fsys_type;
+  unsigned long in_drive;
+  unsigned long in_partition;
+//  int out_fsys_type;
+  unsigned long out_drive;
+  unsigned long out_partition;
+  unsigned long long in_filepos;
+  unsigned long long in_filemax;
+  unsigned long long out_filepos;
+  unsigned long long out_filemax;
+  unsigned long long buf_addr = 0x20000ULL;
+  unsigned long long buf_size = 0x10000ULL;
+  char tmp_in_file[16];
+  char tmp_out_file[16];
+
+  for (;;)
+  {
+    if (grub_memcmp (arg, "if=", 3) == 0)
+      {
+	if (in_file)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	in_file = arg + 3;
+	if (/* *in_file != '/' &&*/ *in_file != '(')
+		return !(errnum = ERR_DEV_FORMAT);
+      }
+    else if (grub_memcmp (arg, "of=", 3) == 0)
+      {
+	if (out_file)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	out_file = arg + 3;
+	if (/* *out_file != '/' &&*/ *out_file != '(')
+		return !(errnum = ERR_DEV_FORMAT);
+      }
+    else if (grub_memcmp (arg, "bs=", 3) == 0)
+      {
+	if (bs)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 3;
+	if (*p == '-')
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &bs))
+		return 0;
+	if (bs == 0 /*|| 0x100000 % bs*/)
+		return !(errnum = ERR_BAD_ARGUMENT);
+      }
+    else if (grub_memcmp (arg, "count=", 6) == 0)
+      {
+	if (count)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 6;
+	if (*p == '-')
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &count))
+		return 0;
+	if (count == 0)
+		return !(errnum = ERR_BAD_ARGUMENT);
+      }
+    else if (grub_memcmp (arg, "skip=", 5) == 0)
+      {
+	if (skip)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 5;
+	if (*p == '-')
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &skip))
+		return 0;
+      }
+    else if (grub_memcmp (arg, "seek=", 5) == 0)
+      {
+	if (seek)
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 5;
+	if (*p == '-')
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &seek))
+		return 0;
+      }
+    else if (grub_memcmp (arg, "buf=", 4) == 0)
+      {
+	if (buf_addr >= 0x100000)	/* already at above 1M, so it is set previously. */
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 4;
+	if (*p == '-')			/* negative */
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &buf_addr))
+		return 0;
+	if (buf_addr < 0x100000)	/* cannot set buffer at below 1M */
+		return !(errnum = ERR_BAD_ARGUMENT);
+      }
+    else if (grub_memcmp (arg, "buflen=", 7) == 0)
+      {
+	if (buf_size > 0x10000)		/* already above 640K, so it is set previously. */
+		return !(errnum = ERR_BAD_ARGUMENT);
+	p = arg + 7;
+	if (*p == '-')			/* negative */
+		return !(errnum = ERR_BAD_ARGUMENT);
+	if (! safe_parse_maxint (&p, &buf_size))
+		return 0;
+	if (buf_size <= 0x10000 || buf_size > 0xFFFFFFFF)	/* cannot set buffer size below 640K */
+		return !(errnum = ERR_BAD_ARGUMENT);
+      }
+    else if (*arg)
+		return !(errnum = ERR_BAD_ARGUMENT);
+    else
+	break;
+    arg = skip_to (0, arg);
+  }
+  
+  if (! in_file || ! out_file)
+	return !(errnum = ERR_BAD_ARGUMENT);
+  if (bs == 0)
+	bs = 512;
+
+//  if (*in_file == '/')
+//  {
+//	in_drive = saved_drive;
+//	in_partition = saved_partition;
+//	in_file--;
+//	*in_file = ')';
+//	in_file--;
+//	*in_file = '(';
+//	if (! grub_open (in_file))
+//		goto fail;
+//	in_filemax = filemax;
+//	grub_close ();
+//  }
+//  else
+  {
+	p = set_device (in_file);
+	if (errnum)
+		goto fail;
+	if (! p)
+	{
+		if (errnum == 0)
+			errnum = ERR_BAD_ARGUMENT;
+		goto fail;
+	}
+	in_drive = current_drive;
+	in_partition = current_partition;
+	/* if only the device portion is specified */
+	if ((unsigned char)*p <= ' ')
+	{
+		in_file = p = tmp_in_file;
+		*p++ = '(';
+		*p++ = ')';
+		*p++ = '+';
+		*p++ = '1';
+		*p = 0;
+		current_drive = saved_drive;
+		current_partition = saved_partition;
+		saved_drive = in_drive;
+		saved_partition = in_partition;
+		in_drive = current_drive;
+		in_partition = current_partition;
+		grub_open (in_file);
+		current_drive = saved_drive;
+		current_partition = saved_partition;
+		saved_drive = in_drive;
+		saved_partition = in_partition;
+		in_drive = current_drive;
+		in_partition = current_partition;
+		if (errnum)
+			goto fail;
+		in_filemax = (unsigned long long)(buf_geom.sector_size) * part_length;
+		grub_sprintf (in_file + 3, "0x%lx", (unsigned long long)part_length);
+		grub_close ();
+	}
+	else
+	{
+		//in_file--;
+		//*in_file = ')';
+		//in_file--;
+		//*in_file = '(';
+		//current_drive = saved_drive;
+		//current_partition = saved_partition;
+		//saved_drive = in_drive;
+		//saved_partition = in_partition;
+		//in_drive = current_drive;
+		//in_partition = current_partition;
+		grub_open (in_file);
+		//current_drive = saved_drive;
+		//current_partition = saved_partition;
+		//saved_drive = in_drive;
+		//saved_partition = in_partition;
+		//in_drive = current_drive;
+		//in_partition = current_partition;
+		in_filemax = filemax;
+		if (errnum)
+			goto fail;
+		grub_close ();
+	}
+  }
+//  in_fsys_type = fsys_type;
+
+//  if (*out_file == '/')
+//  {
+//	out_drive = saved_drive;
+//	out_partition = saved_partition;
+//	out_file--;
+//	*out_file = ')';
+//	out_file--;
+//	*out_file = '(';
+//	if (! grub_open (out_file))
+//		goto fail;
+//	out_filemax = filemax;
+//	grub_close ();
+//  }
+//  else
+  {
+	p = set_device (out_file);
+	if (errnum)
+		goto fail;
+	if (! p)
+	{
+		if (errnum == 0)
+			errnum = ERR_BAD_ARGUMENT;
+		goto fail;
+	}
+	out_drive = current_drive;
+	out_partition = current_partition;
+	/* if only the device portion is specified */
+	if ((unsigned char)*p <= ' ')
+	{
+		out_file = p = tmp_out_file;
+		*p++ = '(';
+		*p++ = ')';
+		*p++ = '+';
+		*p++ = '1';
+		*p = 0;
+		current_drive = saved_drive;
+		current_partition = saved_partition;
+		saved_drive = out_drive;
+		saved_partition = out_partition;
+		out_drive = current_drive;
+		out_partition = current_partition;
+		grub_open (out_file);
+		current_drive = saved_drive;
+		current_partition = saved_partition;
+		saved_drive = out_drive;
+		saved_partition = out_partition;
+		out_drive = current_drive;
+		out_partition = current_partition;
+		if (errnum)
+			goto fail;
+		out_filemax = (unsigned long long)(buf_geom.sector_size) * part_length;
+		grub_sprintf (out_file + 3, "0x%lx", (unsigned long long)part_length);
+		grub_close ();
+	}
+	else
+	{
+		//out_file--;
+		//*out_file = ')';
+		//out_file--;
+		//*out_file = '(';
+		//current_drive = saved_drive;
+		//current_partition = saved_partition;
+		//saved_drive = out_drive;
+		//saved_partition = out_partition;
+		//out_drive = current_drive;
+		//out_partition = current_partition;
+		grub_open (out_file);
+		//current_drive = saved_drive;
+		//current_partition = saved_partition;
+		//saved_drive = out_drive;
+		//saved_partition = out_partition;
+		//out_drive = current_drive;
+		//out_partition = current_partition;
+		out_filemax = filemax;
+		if (errnum)
+			goto fail;
+		grub_close ();
+	}
+  }
+//  out_fsys_type = fsys_type;
+
+  /* calculate in_filepos and out_filepos */
+  in_filepos = skip * bs;
+  out_filepos = seek * bs;
+  if (count)
+  {
+	if (in_filemax > ((count + skip) * bs))
+	    in_filemax = ((count + skip) * bs);
+	if (out_filemax > ((count + seek) * bs))
+	    out_filemax = ((count + seek) * bs);
+  }
+
+  if (in_drive == 0xFFFF && in_file == tmp_in_file &&	/* in_file is (md) */
+      out_drive == 0xFFFF && out_file == tmp_out_file)	/* out_file is (md) */
+  {
+	unsigned long long tmp_part_start = part_start;
+	unsigned long long tmp_part_length = part_length;
+
+	count = in_filemax - in_filepos;
+	if (count > out_filemax - out_filepos)
+	    count = out_filemax - out_filepos;
+
+	part_start = old_part_start;
+	part_length = old_part_length;
+	grub_memmove64 (out_filepos, in_filepos, count);
+	part_start = tmp_part_start;
+	part_length = tmp_part_length;
+	if (debug > 0)
+	{
+		grub_printf ("\nMoved 0x%lX bytes from 0x%lX to 0x%lX\n", (unsigned long long)count, (unsigned long long)in_filepos, (unsigned long long)out_filepos);
+	}
+	errnum = 0;
+	return count;
+  }
+
+  /* (*p == '/') indicates out_file is not a block file */
+  /* (*p != '/') indicates out_file is a block file */
+
+#if 0
+  if (out_drive != ram_drive && out_drive != 0xFFFF && *p != '/')
+  {
+	unsigned long j;
+
+	/* check if it is a mapped memdrive */
+	j = DRIVE_MAP_SIZE;		/* real drive */
+#ifndef GRUB_UTIL
+	if (! unset_int13_handler (1))	/* map is hooked */
+	    for (j = 0; j < DRIVE_MAP_SIZE; j++)
+	    {
+		if (drive_map_slot_empty (hooked_drive_map[j]))
+		{
+			j = DRIVE_MAP_SIZE;	/* real drive */
+			break;
+		}
+
+		if (out_drive == hooked_drive_map[j].from_drive && hooked_drive_map[j].to_drive == 0xFF && !(hooked_drive_map[j].to_cylinder & 0x4000))
+			break;			/* memdrive */
+	    }
+#endif /* ! GRUB_UTIL */
+
+	if (j == DRIVE_MAP_SIZE)	/* real drive */
+	{
+	    /* this command is intended for running in command line and inhibited from running in menu.lst */
+	    if (flags & (BUILTIN_MENU | BUILTIN_SCRIPT))
+	    {
+		errnum = ERR_WRITE_TO_NON_MEM_DRIVE;
+		goto fail;
+	    }
+	}
+  }
+#endif
+
+  {
+    unsigned long long in_pos = in_filepos;
+    unsigned long long out_pos = out_filepos;
+    unsigned long long tmp_size = buf_size;
+
+    if (debug > 0)
+    {
+	count = in_filemax - in_filepos;
+	if (count > out_filemax - out_pos)
+	    count = out_filemax - out_pos;
+	count = ((unsigned long)(count + buf_size - 1) / (unsigned long)buf_size);
+	grub_printf ("buf_size=0x%lX, loops=0x%lX. in_pos=0x%lX, out_pos=0x%lX\n", (unsigned long long)buf_size, (unsigned long long)count, (unsigned long long)in_pos, (unsigned long long)out_pos);
+    }
+    count = 0;
+    while (in_pos < in_filemax && out_pos < out_filemax)
+    {
+	if (debug > 0)
+	{
+		if (!((char)count & 7))
+			grub_printf ("\r");
+		grub_printf ("%08X ", (unsigned long)(count));
+	}
+	/* open in_file */
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+	saved_drive = in_drive;
+	saved_partition = in_partition;
+	in_drive = current_drive;
+	in_partition = current_partition;
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+//	fsys_type = in_fsys_type;
+	if (grub_open (in_file))
+	{
+		filepos = in_pos;
+		//tmp_size = buf_size;
+		if (tmp_size > in_filemax - in_pos)
+		    tmp_size = in_filemax - in_pos;
+		if (grub_read (buf_addr, tmp_size, 0xedde0d90) != tmp_size)	/* read */
+		{
+			if (errnum == 0)
+				errnum = ERR_READ;
+		}
+		{
+			int err = errnum;
+			grub_close ();
+			errnum = err;
+		}
+	}
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+	saved_drive = in_drive;
+	saved_partition = in_partition;
+	in_drive = current_drive;
+	in_partition = current_partition;
+	if (errnum)
+		goto end;
+
+	in_pos += tmp_size;
+	
+	/* open out_file */
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+	saved_drive = out_drive;
+	saved_partition = out_partition;
+	out_drive = current_drive;
+	out_partition = current_partition;
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+//	fsys_type = out_fsys_type;
+	if (grub_open (out_file))
+	{
+		filepos = out_pos;
+		if (tmp_size > out_filemax - out_pos)
+		    tmp_size = out_filemax - out_pos;
+		if (grub_read (buf_addr, tmp_size, 0x900ddeed) != tmp_size)	/* write */
+		{
+			if (errnum == 0)
+				errnum = ERR_WRITE;
+		}
+		{
+			int err = errnum;
+			grub_close ();
+			errnum = err;
+		}
+	}
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+	saved_drive = out_drive;
+	saved_partition = out_partition;
+	out_drive = current_drive;
+	out_partition = current_partition;
+	if (errnum)
+		goto end;
+
+	out_pos += tmp_size;
+	count++;
+    }
+
+end:
+
+    in_pos -= in_filepos;
+    out_pos -= out_filepos;
+
+    if (debug > 0)
+    {
+	int err = errnum;
+	grub_printf ("\nBytes read / written = 0x%lX / 0x%lX\n", (unsigned long long)in_pos, (unsigned long long)out_pos);
+	errnum = err;
+    }
+  }
+
+fail:
+
+//  if (*(long *)(in_file - 1) == 0x2F292869)	/* i()/ */
+//	*(unsigned short *)in_file = 0x3D66;		/* f= */
+//  if (*(long *)(out_file - 1) == 0x2F29286F)	/* o()/ */
+//	*(unsigned short *)out_file = 0x3D66;		/* f= */
+
+  return !(errnum);
+}
+
+static struct builtin builtin_dd =
+{
+  "dd",
+  dd_func,
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
+  "dd if=IF of=OF [bs=BS] [count=C] [skip=IN] [seek=OUT] [buf=ADDR] [buflen=SIZE]",
+  "Copy file IF to OF. BS is blocksize, default to 512. C is blocks to copy,"
+  " default is total blocks in IF. IN specifies number of blocks to skip when"
+  " read, default is 0. OUT specifies number of blocks to skip when write,"
+  " default is 0. Skipped blocks are not touched. Both IF and OF must exist."
+  " dd can neither enlarge nor reduce the size of OF, the leftover tail"
+  " of IF will be discarded. OF cannot be a gzipped file. If IF is a gzipped"
+  " file, it will be decompressed automatically when copying. dd is dangerous,"
+  " use at your own risk. To be on the safe side, you should only use dd to"
+  " write a file in memory. ADDR and SIZE are used for user-defined buffer."
+};
+
+
+#endif	/* ! GRUB_UTIL */
 /* debug */
 static int
 debug_func (char *arg, int flags)
 {
-  int tmp_debug;
+  unsigned long long tmp_debug;
 
   if (! *arg)
   {
@@ -2745,7 +3695,7 @@ debug_func (char *arg, int flags)
   else if (grub_memcmp (arg, "off", 3) == 0)
     debug = 0;
   else if (grub_memcmp (arg, "status", 6) == 0)
-    grub_printf (" Debug is now %d\n", debug);
+    grub_printf (" Debug is now %d\n", (unsigned long)debug);
   else if (safe_parse_maxint (&arg, &tmp_debug))
     debug = tmp_debug;
   else
@@ -2772,6 +3722,7 @@ static struct builtin builtin_debug =
 static int
 default_func (char *arg, int flags)
 {
+  unsigned long long ull;
   int len;
   char *p;
 #if defined(STAGE1_5) || defined(GRUB_UTIL)
@@ -2787,8 +3738,11 @@ default_func (char *arg, int flags)
     }
 #endif /* SUPPORT_DISKLESS */
   
-  if (safe_parse_maxint (&arg, &default_entry))
-    return 1;
+  if (safe_parse_maxint (&arg, &ull))
+    {
+      default_entry = ull;
+      return 1;
+    }
 
   errnum = ERR_NONE;
   
@@ -2803,7 +3757,7 @@ default_func (char *arg, int flags)
     return ! (errnum = ERR_DEFAULT_FILE);
   }
 
-  len = grub_read (mbr, SECTOR_SIZE);
+  len = grub_read ((unsigned long long)(unsigned long)mbr, SECTOR_SIZE, 0xedde0d90);
   grub_close ();
   
 //printf("default_func errnum=%d\n", errnum);
@@ -2833,8 +3787,11 @@ default_func (char *arg, int flags)
   install_partition = current_partition;
   
   p = mbr;
-  if (safe_parse_maxint (&p, &default_entry))
-    return 1;
+  if (safe_parse_maxint (&p, &ull))
+    {
+      default_entry = ull;
+      return 1;
+    }
 
 //printf("default_func errnum=%d\n", errnum);
   errnum = 0;		/* ignore error */
@@ -2931,7 +3888,7 @@ static int
 splashimage_func(char *arg, int flags)
 {
     //char splashimage[64];
-    //int i;
+    int i;
 
     /* If ARG is empty, we reset SPLASHIMAGE.  */
     if (*arg)
@@ -3044,10 +4001,10 @@ static struct builtin builtin_background =
 #endif /* SUPPORT_GRAPHICS */
 
 static int
-in_range (char *range, int val)
+in_range (char *range, unsigned long long val)
 {
-  int start_num;
-  int end_num;
+  unsigned long long start_num;
+  unsigned long long end_num;
 
   for (;;)
   {
@@ -3066,9 +4023,9 @@ in_range (char *range, int val)
     range++;
     if (! safe_parse_maxint (&range, &end_num))
 	break;
-    if (val > start_num && val <= end_num)
+    if ((long long)val > (long long)start_num && (long long)val <= (long long)end_num)
 	return 1;
-    if ((unsigned)val > (unsigned)start_num && (unsigned)val <= (unsigned)end_num)
+    if (val > start_num && val <= end_num)
 	return 1;
     if (*range != ',')
 	break;
@@ -3085,24 +4042,29 @@ int
 checkrange_func(char *arg, int flags)
 {
   struct builtin *builtin1;
-  int ret;
+  unsigned long long ret;
   char *arg1;
 
   arg1 = skip_to (0, arg);	/* the command */
 
   builtin1 = find_command (arg1);
 
+  if ((int)builtin1 != -1)
   if (! builtin1 || ! (builtin1->flags & flags))
   {
 	errnum = ERR_UNRECOGNIZED;
 	return 0;
   }
 
-  arg1 = skip_to (1, arg1);	/* get argument of command */
-  if ((builtin1->func) != errnum_func && (builtin1->func) != checkrange_func)
+  if ((int)builtin1 == -1 || ((builtin1->func) != errnum_func && (builtin1->func) != checkrange_func))
 	errnum = 0;
-  ret = (builtin1->func) (arg1, flags);
 
+  if ((int)builtin1 != -1)
+	ret = (builtin1->func) (skip_to (1, arg1), flags);
+  else
+	ret = command_func (arg1, flags);
+
+  if ((int)builtin1 != -1)
   if ((builtin1->func) == errnum_func /*|| (builtin1->func) == checkrange_func*/)
 	errnum = 0;
   if (errnum)
@@ -3187,7 +4149,8 @@ checktime_func(char *arg, int flags)
       p = arg;
       while (1)
         {
-          int m1, m2, m3, j;
+          unsigned long long m1, m2, m3;
+	  int j;
 
           if (*p == '*')
             {
@@ -3334,7 +4297,7 @@ displaymem_func (char *arg, int flags)
 
   grub_printf (" Lower memory: %uK, "
 	       "Upper memory (to first chipset hole): %uK\n",
-	       saved_mem_lower, saved_mem_upper);
+	       (unsigned long)saved_mem_lower, (unsigned long)saved_mem_upper);
 
   if (mbi.flags & MB_INFO_MEM_MAP)
     {
@@ -3351,13 +4314,10 @@ displaymem_func (char *arg, int flags)
 	    str = "Usable RAM";
 	  else
 	    str = "Reserved";
-	  grub_printf ("   %s:  Base Address:  0x%x X 4GB + 0x%x,\n"
-		       "      Length:   0x%x X 4GB + 0x%x bytes\n",
+	  grub_printf ("  %s: Base: 0x%lX, Length: 0x%lX\n",
 		       str,
-		       (unsigned long) (map->BaseAddr >> 32),
-		       (unsigned long) (map->BaseAddr & 0xFFFFFFFF),
-		       (unsigned long) (map->Length >> 32),
-		       (unsigned long) (map->Length & 0xFFFFFFFF));
+		       (unsigned long long)(map->BaseAddr),
+		       (unsigned long long)(map->Length));
 
 	  map = ((struct AddrRangeDesc *) (((int) map) + 4 + map->size));
 	}
@@ -3407,7 +4367,7 @@ dump_func (char *arg, int flags)
       return 0;
     }
 
-  while (grub_read (&c, 1))
+  while (grub_read ((unsigned long long)(unsigned int)&c, 1, 0xedde0d90))
     if (fputc (c, fp) == EOF)
       {
 	errnum = ERR_WRITE;
@@ -3437,6 +4397,7 @@ static struct builtin builtin_dump =
 #endif /* GRUB_UTIL */
 
 
+#ifdef GRUB_UTIL
 static char embed_info[32];
 /* embed */
 /* Embed a Stage 1.5 in the first cylinder after MBR or in the
@@ -3458,7 +4419,7 @@ embed_func (char *arg, int flags)
     return 0;
 
   /* Read the whole of the Stage 1.5.  */
-  len = grub_read (stage1_5_buffer, -1);
+  len = grub_read ((unsigned long long)(unsigned int)stage1_5_buffer, -1ULL, 0xedde0d90);
   grub_close ();
   
   if (errnum)
@@ -3482,7 +4443,7 @@ embed_func (char *arg, int flags)
 #if 0	/* !!!! The obsolete EZ-BIOS no longer supported !!!! */
       char ezbios_check[2*SECTOR_SIZE];
 #endif
-      //int i;
+      int i;
       
       /* Open the partition.  */
       if (! open_partition ())
@@ -3497,7 +4458,7 @@ embed_func (char *arg, int flags)
       
       /* Read the MBR of CURRENT_DRIVE.  */
       //printf ("current_drive=%X, mbr=%X\n", current_drive, mbr);
-      if (! rawread (current_drive, PC_MBR_SECTOR, 0, SECTOR_SIZE, mbr))
+      if (! rawread (current_drive, PC_MBR_SECTOR, 0, SECTOR_SIZE, (unsigned long long)(unsigned int)mbr, 0xedde0d90))
 	return 0;
       
       //printf ("current_drive=%X, mbr=%X\n", current_drive, mbr);
@@ -3563,11 +4524,11 @@ embed_func (char *arg, int flags)
   buf_track = -1;
 
   /* Now perform the embedding.  */
-  if (! devwrite (sector - part_start, size, stage1_5_buffer))
+  if (! devwrite ((unsigned long)(sector - part_start), size, stage1_5_buffer))
     return 0;
   
-  grub_printf (" %d sectors are embedded.\n", size);
-  grub_sprintf (embed_info, "%d+%d", sector - part_start, size);
+  grub_printf (" %d sectors are embedded.\n", (unsigned long)size);
+  grub_sprintf (embed_info, "%d+%d", (unsigned long)(sector - part_start), (unsigned long)size);
   return 1;
 }
 
@@ -3581,6 +4542,7 @@ static struct builtin builtin_embed =
   " is a drive, or in the \"bootloader\" area if DEVICE is a FFS partition."
   " Print the number of sectors which STAGE1_5 occupies if successful."
 };
+#endif /* GRUB_UTIL */
 
 
 /* errnum */
@@ -3612,7 +4574,7 @@ errorcheck_func (char *arg, int flags)
   {
     errorcheck = ! errorcheck;
     if (debug > 0)
-      grub_printf (" Error check is toggled now to be %s\n", errorcheck ? "on" : "off");
+      grub_printf (" Error check is toggled now to be %s\n", (errorcheck ? "on" : "off"));
   }
   else if (grub_memcmp (arg, "on", 2) == 0)
     errorcheck = 1;
@@ -3621,7 +4583,7 @@ errorcheck_func (char *arg, int flags)
   else if (grub_memcmp (arg, "status", 6) == 0)
   {
     if (debug > 0)
-      grub_printf (" Error check is now %s\n", errorcheck ? "on" : "off");
+      grub_printf (" Error check is now %s\n", (errorcheck ? "on" : "off"));
   }
   else
       errnum = ERR_BAD_ARGUMENT;
@@ -3643,11 +4605,16 @@ static struct builtin builtin_errorcheck =
 static int
 fallback_func (char *arg, int flags)
 {
-  i = 0;
-
+  unsigned long i = 0;
+  int go=0;
+  if (memcmp(arg,"--go",4) == 0)
+	{
+		go = 1;
+		arg = skip_to (0, arg);
+	}
   while (*arg)
     {
-      int entry;
+      unsigned long long entry;
       unsigned long j;
       
       if (! safe_parse_maxint (&arg, &entry))
@@ -3671,7 +4638,7 @@ fallback_func (char *arg, int flags)
     fallback_entries[i] = -1;
 
   fallback_entryno = (i == 0) ? -1 : 0;
-  
+  if (go) return (errnum = MAX_ERR_NUM);
   return 1;
 }
 
@@ -3688,6 +4655,199 @@ static struct builtin builtin_fallback =
   " `default' command). This obviously won't help if the machine"
   " was rebooted by a kernel that GRUB loaded."
 #endif
+};
+
+
+/* command */
+char command_path[128]="(bd)/grub/";
+int
+command_func (char *arg, int flags)
+{
+  while (*arg == ' ' || *arg == '\t') arg++;
+  if ((unsigned char)*arg < 0x20)
+  {
+	if (debug > 0)
+		printf("Current default path: %s\n",command_path);
+	return 20;
+  }
+	
+	if (grub_memcmp (arg, "--set-path=", 11) == 0)
+	{
+		arg += 11;
+		if (strlen(arg) >= 127)
+		{
+			if (debug > 0)
+				printf("Set default command path error: PATH is too long \n");
+			return 0;
+		}
+		if (! *arg)
+			return sprintf(command_path,"(bd)/grub/\0");
+		int j;
+
+		for (j = 0; j < 126; j++)
+		{
+			if (*arg == 0x20 || *arg == '\t' || *arg == 0)
+			{
+				break;
+			}
+			command_path[j] = *arg;
+			arg++;
+		}
+		
+		if (command_path[j-1] != '/') command_path[j++] = '/';
+		command_path[j] = 0;
+		return 1;
+	}
+  if (! flags)	/* check syntax only */
+  {
+    if (*arg == '/' || *arg == '(' || *arg == '+')
+	return 1;
+    if (*arg >= '0' && *arg <= '9')
+	return 1;
+    if (*arg >= 'a' && *arg <= 'z')
+	return 1;
+    if (*arg >= 'A' && *arg <= 'Z')
+	return 1;
+    return 0;
+  }
+
+  /* open the command file. */
+  {
+	char *filename;
+	char command_filename[256];
+
+	grub_memmove (command_filename + 1, arg, sizeof(command_filename) - 2);
+	command_filename[0] = '/';
+	command_filename[255] = 0;
+	nul_terminate (command_filename + 1);
+	filename = command_filename + 1;
+
+	if ((*arg >= 'a' && *arg <= 'z') || (*arg >= 'A' && *arg <= 'Z'))
+	{
+		char filename_t[512];/* use 512 here instead of 256 to avoid buffer overflow in the following sprintf. */
+		sprintf(filename_t,"%s%s\0",command_path,filename);
+		if ((! grub_open (filename_t)) && (! grub_open (filename - 1)))
+		{
+			if (debug > 0)
+				grub_printf ("Warning! No such command: %s\n", filename);
+			errnum = 0;	/* No error, so that old menus will run smoothly. */
+			return 0;	/* return 0 indicating a failure or a false case. */
+		}
+		errnum = 0;
+	}
+	else if (! grub_open (filename))
+	{
+		return 0;	/* return 'failure' with errnum set. */
+	}
+
+	if (filemax < 9ULL)
+	{
+		errnum = ERR_EXEC_FORMAT;
+		goto fail;
+	}
+  }
+
+  /* check if we have enough memory. */
+  {
+	unsigned long long memory_needed;
+
+	arg = skip_to (0, arg);		/* get argument of command */
+	memory_needed = filemax + ((grub_strlen (arg) + 16) & ~0xF) + 16 + 16;
+
+	/* The amount of free memory is (free_mem_end - free_mem_start) */
+
+	if (memory_needed > (free_mem_end - free_mem_start))
+	{
+		errnum = ERR_WONT_FIT;
+		goto fail;
+	}
+  }
+
+  /* Where is the free memory? build PSP, load the executable image. */
+  {
+	unsigned long pid = 255;
+	unsigned long j;
+	unsigned long psp_len;
+
+	for (j = 1; (unsigned long)&mem_alloc_array_start[j] < mem_alloc_array_end && mem_alloc_array_start[j].addr; j++)
+	    if (pid < mem_alloc_array_start[j].pid)
+		pid = mem_alloc_array_start[j].pid;
+	pid++;	/* new pid. */
+
+	/* j - 1 is possibly for free memory start */
+	--j;
+
+	if ((mem_alloc_array_start[j].addr & 0x01))	/* no free memory. */
+	{
+		errnum = ERR_WONT_FIT;
+		goto fail;
+	}
+
+	/* check sanity */
+	if ((mem_alloc_array_start[j].addr & 0xFFFFFFF0) != free_mem_start)
+	{
+		errnum = ERR_INTERNAL_CHECK;
+		goto fail;
+	}
+
+	((unsigned long *)free_mem_start)[0] = psp_len = ((grub_strlen (arg) + 16) & ~0xF) + 16 + 16;
+	grub_memmove ((char *)(free_mem_start + 16), arg, grub_strlen (arg) + 1);	/* copy args into somewhere in PSP. */
+	*(unsigned long *)(free_mem_start + psp_len - 4) = psp_len;		/* PSP length in bytes. it is in both the starting dword and the ending dword of the PSP. */
+	*(unsigned long *)(free_mem_start + psp_len - 8) = psp_len - 16;	/* args is here. */
+	*(unsigned long *)(free_mem_start + psp_len - 12) = flags;		/* flags is here. */
+	/* (free_mem_start + pid - 16) is reserved for full pathname of the program file. */
+
+	/* kernel image is destroyed, so invalidate the kernel */
+	if (kernel_type < KERNEL_TYPE_CHAINLOADER)
+	    kernel_type = KERNEL_TYPE_NONE;
+
+	if (grub_read ((unsigned long long)(free_mem_start + psp_len), -1ULL, 0xedde0d90) != filemax)
+	{
+		if (! errnum)
+			errnum = ERR_EXEC_FORMAT;
+		goto fail;
+	}
+	grub_close ();
+
+	/* check exec signature. */
+	if (*(unsigned long long *)(int)(free_mem_start + psp_len + filemax - 8) != 0xBCBAA7BA03051805ULL)
+		return ! (errnum = ERR_EXEC_FORMAT);
+
+	/* allocate all memory to the program. */
+	mem_alloc_array_start[j].addr |= 0x01;	/* the memory is now in use. */
+	mem_alloc_array_start[j].pid = pid;	/* with this pid. */
+
+	psp_len += free_mem_start;
+	free_mem_start = free_mem_end;		/* no free memory for other programs. */
+
+	/* call the new program.  (free_mem_start + psp_len) = entry point of program. */
+	pid = ((int (*)(void))(psp_len))();	/* pid holds return value. */
+
+	/* on exit, release the memory. */
+	for (j = 1; (unsigned long)&mem_alloc_array_start[j] < mem_alloc_array_end && mem_alloc_array_start[j].addr; j++)
+		;
+	--j;
+	mem_alloc_array_start[j].pid = 0;
+	free_mem_start = (mem_alloc_array_start[j].addr &= 0xFFFFFFF0);
+	return pid;
+  }
+
+  //return 1;
+
+fail:
+
+  grub_close ();
+  return 0;
+}
+
+static struct builtin builtin_command =
+{
+  "command",
+  command_func,
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST | BUILTIN_BOOTING,
+  "command [--set-path=PATH] FILE [ARGS]",
+  "Run executable file FILE with arguments ARGS."
+  "--set-path sets a search PATH for executable files,default is (bd)/grub."
 };
 
 
@@ -3781,7 +4941,7 @@ set_partition_hidden_flag (int hidden)
 	  if (hidden == -1)	/* status only */
 	  {
 		if (debug > 0)
-			grub_printf ("Partition (hd%d,%d) is %shidden.\n", (current_drive & 0x7F), part>>16, (is_hidden ? "" : "not "));
+			grub_printf ("Partition (hd%d,%d) is %shidden.\n", (current_drive & 0x7F), (unsigned long)(unsigned char)(part>>16), (is_hidden ? "" : "not "));
 		
 		return is_hidden;
 	  }
@@ -3800,10 +4960,10 @@ set_partition_hidden_flag (int hidden)
 			return 0;
 
 		if (debug > 0)
-			grub_printf ("Partition (hd%d,%d) successfully set %shidden.\n", (current_drive & 0x7F), part>>16, (hidden ? "" : "un"));
+			grub_printf ("Partition (hd%d,%d) successfully set %shidden.\n", (current_drive & 0x7F), (unsigned long)(unsigned char)(part>>16), (hidden ? "" : "un"));
 	  } else {
 		if (debug > 0)
-			grub_printf ("Partition (hd%d,%d) was already %shidden.\n", (current_drive & 0x7F), part>>16, (hidden ? "" : "un"));
+			grub_printf ("Partition (hd%d,%d) was already %shidden.\n", (current_drive & 0x7F), (unsigned long)(unsigned char)(part>>16), (hidden ? "" : "un"));
 
 	  }
 	  
@@ -3835,6 +4995,7 @@ find_func (char *arg, int flags)
   char *set_root = 0;
   unsigned long ignore_cd = 0;
   unsigned long ignore_floppies = 0;
+  unsigned long ignore_oem = 0;
   //char *in_drives = NULL;	/* search in drive list */
   char root_found[16];
   
@@ -3858,6 +5019,10 @@ find_func (char *arg, int flags)
       {
 	ignore_floppies = 1;
       }
+	else if (grub_memcmp (arg, "--ignore-oem", 12) == 0)
+      {
+	ignore_oem = 1;
+      }
     else
 	break;
     arg = skip_to (0, arg);
@@ -3878,25 +5043,74 @@ find_func (char *arg, int flags)
 
   /* arg points to command. */
 
-  if (*arg >= 'a' && *arg <= 'z')
+//  if (*arg >= 'a' && *arg <= 'z')
+  if (*arg)
   {
     builtin1 = find_command (arg);
-
+    if ((int)builtin1 != -1)
     if (! builtin1 || ! (builtin1->flags & flags))
     {
 	errnum = ERR_UNRECOGNIZED;
 	return 0;
     }
-    arg = skip_to (1, arg);	/* get argument of command */
+    if ((int)builtin1 != -1)
+	arg = skip_to (1, arg);	/* get argument of command */
+    else
+	builtin1 = &builtin_command;
   }
-  else if (*arg)
-  {
-	errnum = ERR_UNRECOGNIZED;
-	return 0;
-  }
+//  else if (*arg)
+//  {
+//	errnum = ERR_UNRECOGNIZED;
+//	return 0;
+//  }
 
   errnum = 0;
 
+#ifdef FSYS_FB
+  if (fb_status)
+    {
+      current_drive = FB_DRIVE;
+      current_partition = 0xFFFFFF;
+      
+      if (filename == 0)
+	{
+	  saved_drive = current_drive;
+	  saved_partition = current_partition;
+	  ret = builtin1 ? (builtin1->func) (arg, flags) : 1;
+	  if (ret)
+	  {
+	    grub_sprintf (root_found, "(ud)");
+	    if (debug > 0)
+		grub_printf (" %s\n", root_found);
+	    got_file = 1;
+	    if (set_root)
+		goto found;
+	  }
+	}
+      else if (open_device ())
+	{
+	  saved_drive = current_drive;
+	  saved_partition = current_partition;
+	  if (grub_open (filename))
+	    {
+	      grub_close ();
+	      ret = builtin1 ? (builtin1->func) (arg, flags) : 1;
+	      if (ret)
+	      {
+	        grub_sprintf (root_found, "(ud)");
+	        if (debug > 0)
+		  grub_printf (" %s\n", root_found);
+	        got_file = 1;
+	        if (set_root)
+		  goto found;
+	      }
+	    }
+	}
+
+      errnum = ERR_NONE;
+    }
+#endif
+ 
   /* Hard disks. Search in hard disks first, since floppies are slow */
 #ifdef GRUB_UTIL
 #define FIND_DRIVES 8
@@ -3927,6 +5141,7 @@ find_func (char *arg, int flags)
 		next_partition ()))
 	{
 	  if (type != PC_SLICE_TYPE_NONE
+		  && ! (ignore_oem == 1 && (type & ~PC_SLICE_TYPE_HIDDEN_FLAG) == 0x02) 
 	      && ! IS_PC_SLICE_TYPE_BSD (type)
 	      && ! IS_PC_SLICE_TYPE_EXTENDED (type))
 	    {
@@ -3944,10 +5159,10 @@ find_func (char *arg, int flags)
 		  {
 		    if (bsd_part == 0xFF)
 			grub_sprintf (root_found, "(hd%d,%d)",
-				     drive - 0x80, pc_slice);
+				     (drive - 0x80), pc_slice);
 		    else
 			grub_sprintf (root_found, "(hd%d,%d,%c)",
-				     drive - 0x80, pc_slice, bsd_part + 'a');
+				     (drive - 0x80), pc_slice, (bsd_part + 'a'));
 
 		    if (debug > 0)
 		        grub_printf (" %s\n", root_found);
@@ -3972,10 +5187,10 @@ find_func (char *arg, int flags)
 		      {
 		        if (bsd_part == 0xFF)
 			  grub_sprintf (root_found, "(hd%d,%d)",
-				     drive - 0x80, pc_slice);
+				     (drive - 0x80), pc_slice);
 		        else
 			  grub_sprintf (root_found, "(hd%d,%d,%c)",
-				     drive - 0x80, pc_slice, bsd_part + 'a');
+				     (drive - 0x80), pc_slice, (bsd_part + 'a'));
 
 		        if (debug > 0)
 		          grub_printf (" %s\n", root_found);
@@ -4159,6 +5374,292 @@ static struct builtin builtin_find =
 };
 
 
+/* uuid */
+/* List filesystem UUID in all of partitions or search for filesystem
+ * with specified UUID and set the partition as root.
+ * Contributed by Jing Liu ( fartersh-1@yahoo.com )
+ */
+static void print_root_device (void);
+static void get_uuid (char* uuid_found);
+static int
+uuid_func (char *arg, int flags)
+{
+  unsigned long drive;
+  unsigned long tmp_drive = saved_drive;
+  unsigned long tmp_partition = saved_partition;
+  char root_found[16] = "";
+  char uuid_found[100];
+
+	if (*arg == '(')
+	{
+		set_device (arg);
+		if (errnum)
+			return 0;
+		if (! open_device ())
+			return 0;
+		saved_drive = current_drive;
+		saved_partition = current_partition;
+		grub_memset (uuid_found, 0, 100);
+                if (errnum != ERR_FSYS_MOUNT && fsys_type < NUM_FSYS)
+			get_uuid (uuid_found);
+		arg = skip_to (0, arg);
+		if (! *arg )
+		{
+			/* Print the type of the filesystem.  */
+			if (debug > 0)
+			{
+				print_root_device ();
+				grub_printf (" UUID is %s\n\t", ((*uuid_found) ? uuid_found : "(unsupported)"));
+				print_fsys_type ();
+			}
+			saved_drive = tmp_drive;
+			saved_partition = tmp_partition;
+			errnum = ERR_NONE;
+			return (*uuid_found);
+		}
+		saved_drive = tmp_drive;
+		saved_partition = tmp_partition;
+		errnum = ERR_NONE;
+		return ! grub_strcmp ((char*)uuid_found, arg);
+	}
+
+//  if (! *arg && (flags & (BUILTIN_MENU | BUILTIN_SCRIPT)))
+//    {
+//      if (debug > 0)
+//        grub_printf ("uuid must be used with UUID argument in menu.lst.\n");
+//	return ! (errnum = ERR_BAD_ARGUMENT);
+//    }
+
+  errnum = 0;
+  /* Search in hard disks first, since floppies are slow */
+#ifdef GRUB_UTIL
+#define FIND_DRIVES 8
+#else
+#define FIND_DRIVES (*((char *)0x475))
+#endif
+  for (drive = 0x80; drive < 0x80 + FIND_DRIVES; drive++)
+#undef FIND_DRIVES
+    {
+      unsigned long part = 0xFFFFFF;
+      unsigned long start, len, offset, ext_offset1;
+      unsigned long type, entry1;
+
+      current_drive = drive;
+      while ((	next_partition_drive		= drive,
+		next_partition_dest		= 0xFFFFFF,
+		next_partition_partition	= &part,
+		next_partition_type		= &type,
+		next_partition_start		= &start,
+		next_partition_len		= &len,
+		next_partition_offset		= &offset,
+		next_partition_entry		= &entry1,
+		next_partition_ext_offset	= &ext_offset1,
+		next_partition_buf		= mbr,
+		next_partition ()))
+	{
+	  if (type != PC_SLICE_TYPE_NONE
+	      && ! IS_PC_SLICE_TYPE_BSD (type)
+	      && ! IS_PC_SLICE_TYPE_EXTENDED (type))
+	    {
+	      current_partition = part;
+	      if (open_device ())
+		{
+		  int bsd_part = (part >> 8) & 0xFF;
+		  int pc_slice = part >> 16;
+		  saved_drive = current_drive;
+		  saved_partition = current_partition;
+		  grub_memset(uuid_found, 0, 100);
+                  if (errnum != ERR_FSYS_MOUNT && fsys_type < NUM_FSYS)
+                    get_uuid(uuid_found);
+		  if (*uuid_found)
+                    {
+                      if (! *arg )
+                        {
+		          if (bsd_part == 0xFF)
+			    grub_printf("(hd%d,%d): UUID is %s\n\t", (drive - 0x80), (unsigned long)(unsigned char)(part >> 16), uuid_found);
+		          else
+			    grub_printf ("(hd%d,%d,%c): UUID is %s\n\t",
+                                          (drive - 0x80), pc_slice, (bsd_part + 'a'), uuid_found);
+                          print_fsys_type();
+		        }
+                      else if (grub_strcmp((char*)uuid_found,arg) == 0)
+                        {
+		          if (bsd_part == 0xFF)
+                            grub_sprintf(root_found,"(hd%d,%d)", (drive - 0x80), (unsigned long)(unsigned char)(part >> 16));
+                          else
+                            grub_sprintf(root_found,"(hd%d,%d,%c)",
+			                  (drive - 0x80), pc_slice, (bsd_part + 'a'));
+                          goto found;
+                        }
+                    }
+                  else if (debug > 0)
+                    {
+		      if (bsd_part == 0xFF)
+                        grub_printf("(hd%d,%d): UUID is (unsupported)\n\t", (drive - 0x80), (unsigned long)(unsigned char)(part >> 16));
+                      else
+                        grub_printf("(hd%d,%d,%c): UUID is (unsupported)\n\t",
+                                     (drive - 0x80), pc_slice, (bsd_part + 'a'));
+                      print_fsys_type();
+                    }
+                }
+	    }
+
+	  /* We want to ignore any error here.  */
+	  errnum = ERR_NONE;
+	}
+
+      /* next_partition always sets ERRNUM in the last call, so clear it.  */
+      errnum = ERR_NONE;
+    }
+
+  /* Floppies.  */
+#ifdef GRUB_UTIL
+#define FIND_DRIVES 8
+#else
+#define FIND_DRIVES (((*(char*)0x410) & 1)?((*(char*)0x410) >> 6) + 1 : 0)
+#endif
+  for (drive = 0; drive < 0 + FIND_DRIVES; drive++)
+#undef FIND_DRIVES
+    {
+      current_drive = drive;
+      current_partition = 0xFFFFFF;
+      if (open_device ())
+	{
+	  saved_drive = current_drive;
+	  saved_partition = current_partition;
+          grub_memset(uuid_found, 0, 100);
+          if (errnum != ERR_FSYS_MOUNT && fsys_type < NUM_FSYS)
+            get_uuid(uuid_found);
+          if (*uuid_found)
+            {
+              if (! *arg )
+                {
+                  grub_printf("(fd%d): UUID is %s\n\t", drive, uuid_found);
+                  print_fsys_type();
+                }
+              else if (grub_strcmp((char*)uuid_found,arg) == 0)
+                {
+                  grub_sprintf(root_found,"(fd%d)", drive);
+                  goto found;
+                }
+            }
+          else if (debug > 0)
+            {
+              grub_printf("(fd%d): UUID is (unsupported)\n\t", drive);
+              print_fsys_type();
+            }
+	}
+      errnum = ERR_NONE;
+  }
+
+found:
+  saved_drive = tmp_drive;
+  saved_partition = tmp_partition;
+  errnum = ERR_NONE;
+  if (! *arg)
+    return 1;
+        
+  if (*root_found)
+    {
+      if (debug > 0)
+        grub_printf("setting root to %s\n", root_found);
+      return real_root_func(root_found,1);
+    }
+
+  errnum = ERR_NO_PART;
+  return 0;
+}
+
+static struct builtin builtin_uuid =
+{
+  "uuid",
+  uuid_func,
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
+  "uuid [DEVICE] [UUID]",
+  "If DEVICE is not specified, search for filesystem with UUID in all"
+  " partitions and set the partition containing the filesystem as new"
+  " root(if UUID is specified), or just list uuid's of all filesystems"
+  " on all devices(if UUID is not specified). If DEVICE is specified," 
+  " return true or false according to whether or not the DEVICE matches"
+  " the specified UUID(if UUID is specified), or just list the uuid of"
+  " DEVICE(if UUID is not specified)."
+};
+
+static void
+get_uuid (char* uuid_found)
+{
+  unsigned char uuid[32] = "";
+    {
+#ifdef FSYS_FAT
+      if (grub_memcmp(fsys_table[fsys_type].name, "fat", 3) == 0)
+        {
+          char fat_length[2];
+          devread(0, 0x16, 2, (unsigned long long)(unsigned long)fat_length, 0xedde0d90);
+          if (*(unsigned short*)fat_length)
+            // FAT12/16
+            devread(0, 0x27, 4, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          else
+            // FAT32
+            devread(0, 0x43, 4, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          grub_sprintf(uuid_found, "%02X%02X-%02X%02X", uuid[3], uuid[2], uuid[1], uuid[0]);
+          return;
+        }  
+#endif
+#ifdef FSYS_NTFS
+      if (grub_memcmp(fsys_table[fsys_type].name, "ntfs", 4) == 0)
+        {
+          devread(0, 0x48, 8, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          grub_sprintf(uuid_found, "%02X%02X%02X%02X%02X%02X%02X%02X", uuid[7], uuid[6], uuid[5], uuid[4], uuid[3], uuid[2], uuid[1], uuid[0]);
+          return;
+        }
+#endif
+#ifdef FSYS_EXT2FS
+      if (grub_memcmp(fsys_table[fsys_type].name, "ext2fs", 6) == 0)
+        {
+          devread(2, 0x68, 16, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          grub_sprintf(uuid_found, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+          return;
+        }
+#endif
+#ifdef FSYS_REISERFS
+      if (grub_memcmp(fsys_table[fsys_type].name, "reiserfs", 8) == 0)
+        {
+          char version[9];
+          devread(0x10, 52, 9, (unsigned long long)(unsigned long)version, 0xedde0d90);
+          if (grub_memcmp(version, "ReIsEr2Fs", 9) == 0 || grub_memcmp(version, "ReIsEr3Fs", 9) == 0)
+            devread(0x10, 84, 16, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          else
+            {
+              devread(0x10, 0, 7, (unsigned long long)(unsigned long)version, 0xedde0d90);
+              if (grub_memcmp(version, "ReIsEr4", 7) == 0)
+                devread(0x10, 20, 16, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+              else
+                return;
+            }
+          grub_sprintf(uuid_found, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+          return;
+        }
+#endif
+#ifdef FSYS_JFS
+      if (grub_memcmp(fsys_table[fsys_type].name, "jfs", 3) == 0)
+        {
+          devread(0x40, 136, 16, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          grub_sprintf(uuid_found, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+          return;
+        }
+#endif
+#ifdef FSYS_XFS
+      if (grub_memcmp(fsys_table[fsys_type].name, "xfs", 3) == 0)
+        {
+          devread(2, 32, 16, (unsigned long long)(unsigned long)uuid, 0xedde0d90);
+          grub_sprintf(uuid_found, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+          return;
+        }
+#endif
+    }
+}
+
+
 /* fstest */
 static int
 fstest_func (char *arg, int flags)
@@ -4185,7 +5686,7 @@ fstest_func (char *arg, int flags)
   else if (grub_memcmp (arg, "status", 6) == 0)
   {
     if (debug > 0)
-      grub_printf (" Filesystem tracing is now %s\n", disk_read_hook ? "on" : "off");
+      grub_printf (" Filesystem tracing is now %s\n", (disk_read_hook ? "on" : "off"));
   }
   else
       errnum = ERR_BAD_ARGUMENT;
@@ -4202,6 +5703,43 @@ static struct builtin builtin_fstest =
   "Turn on/off or display the fstest mode, or toggle it if no argument."
 };
 
+#ifdef SUPPORT_GFX
+
+/* graphics */
+static int
+gfxmenu_func (char *arg, int flags)
+{
+    //if (*arg)
+    //{
+	/* filename can only be 64 characters due to our buffer size */
+	if (strlen(arg) > 63)
+		return ! (errnum = ERR_WONT_FIT);
+    
+	if (! grub_open(arg))
+		return 0;
+	grub_close();
+    //}
+
+    strcpy(graphics_file, arg);
+
+  //memmove(graphics_file, arg, sizeof graphics_file - 1);  
+  //graphics_file[sizeof graphics_file - 1] = 0;
+  gfx_drive = saved_drive;
+  gfx_partition = saved_partition;
+
+  return 1;
+}
+
+static struct builtin builtin_gfxmenu =
+{
+  "gfxmenu",
+  gfxmenu_func,
+  BUILTIN_MENU | BUILTIN_HELP_LIST,
+  "gfxmenu FILE",
+  "Use the graphical menu from FILE."
+};
+#endif
+
 
 /* geometry */
 static int
@@ -4213,6 +5751,26 @@ geometry_func (char *arg, int flags)
 //#ifdef GRUB_UTIL
 //  char *ptr;
 //#endif
+
+#ifndef GRUB_UTIL
+  int sync = 0;
+
+  force_geometry_tune = 0;
+  for (;;)
+  {
+    if (grub_memcmp (arg, "--tune", 6) == 0)
+    {
+      force_geometry_tune = 1;
+    }
+    else if (grub_memcmp (arg, "--sync", 6) == 0)
+    {
+      sync = 1;
+    }
+    else
+	break;
+    arg = skip_to (0, arg);
+  }
+#endif
 
   /* Get the drive and the partition.  */
   if (! *arg || *arg == ' ' || *arg == '\t')
@@ -4234,13 +5792,143 @@ geometry_func (char *arg, int flags)
   /* Check for the geometry.  */
   if (get_diskinfo (current_drive, &tmp_geom))
     {
+#ifndef GRUB_UTIL
+      force_geometry_tune = 0;
+#endif
       errnum = ERR_NO_DISK;
       return 0;
     }
+#ifndef GRUB_UTIL
+  force_geometry_tune = 0;
+#endif
+
+#ifndef GRUB_UTIL
+  if (sync)
+  {
+#define	BS	((struct master_and_dos_boot_sector *)mbr)
+
+    /* Read MBR or the floppy boot sector.  */
+    if (! rawread (current_drive, 0, 0, SECTOR_SIZE, (unsigned long long)(unsigned long)mbr, 0xedde0d90))
+	return 0;
+
+    if (current_drive == cdrom_drive || (current_drive >= (unsigned char)min_cdrom_id && current_drive < (unsigned char)(min_cdrom_id + atapi_dev_count)))
+	return 1;
+    if (current_drive & 0x80)
+    {
+	unsigned long start_cl, start_ch, start_dh, start_lba[4];
+	unsigned long end_cl, end_ch, end_dh, end_lba[4];
+	unsigned long entry1;
+
+	if (current_drive >= 0x88 || current_drive >= 0x80 + (*(unsigned char *)0x475))
+		return 1;
+
+	/* repair partition table. */
+
+	for (entry1 = 0; entry1 < 4; entry1++)
+	{
+		/* get absolute starting and ending sector number. */
+		start_lba[entry1] = PC_SLICE_START (mbr, entry1);
+		end_lba[entry1] = start_lba[entry1] + PC_SLICE_LENGTH (mbr, entry1) - 1;
+		/* skip null entry. */
+		if (! start_lba[entry1] || ! end_lba[entry1])
+			continue;
+		/* calculate the new CHS starting and ending values. */
+		lba_to_chs (start_lba[entry1], &start_cl, &start_ch, &start_dh);
+		lba_to_chs (end_lba[entry1], &end_cl, &end_ch, &end_dh);
+		/* update values of the partition table in memory */
+		PC_SLICE_HEAD (mbr, entry1) = start_dh;
+		PC_SLICE_SEC (mbr, entry1) = start_cl;
+		PC_SLICE_CYL (mbr, entry1) = start_ch;
+		PC_SLICE_EHEAD (mbr, entry1) = end_dh;
+		PC_SLICE_ESEC (mbr, entry1) = end_cl;
+		PC_SLICE_ECYL (mbr, entry1) = end_ch;
+	}
+	if (debug > 0)
+	    grub_printf ("Writing MBR for drive 0x%X ... ", current_drive);
+	/* Write back/update the MBR.  */
+	if (! rawwrite (current_drive, 0, mbr))
+	{
+	    if (debug > 0)
+		grub_printf ("failure.\n");
+            return 0;
+	} else {
+	    if (debug > 0)
+		grub_printf ("success.\n");
+	}
+
+	/* repair BPB of each primary partition. */
+
+	for (entry1 = 0; entry1 < 4; entry1++)
+	{
+		/* skip null entry. */
+		if (! start_lba[entry1] || ! end_lba[entry1])
+			continue;
+		/* Read the first sector of the partition.  */
+		if (! rawread (current_drive, start_lba[entry1], 0, SECTOR_SIZE, (unsigned long long)(unsigned long)mbr, 0xedde0d90))
+			continue;	/* on read failure, try next entry */
+
+		/* try to find out the filesystem type */
+		if (BS->boot_signature == 0xAA55 && ! probe_bpb(BS) && filesystem_type > 0)
+		{
+		    if (BS->total_heads != tmp_geom.heads || BS->sectors_per_track != tmp_geom.sectors)
+		    {
+			if (debug > 0)
+			    grub_printf ("(hd%d,%d): Changing H/S=%d/%d to H/S=%d/%d ... ", (current_drive & 0x7F), entry1, BS->total_heads, BS->sectors_per_track, tmp_geom.heads, tmp_geom.sectors);
+			BS->total_heads = tmp_geom.heads;
+			BS->sectors_per_track = tmp_geom.sectors;
+
+			/* Write back/update the floppy boot sector.  */
+			if (! rawwrite (current_drive, start_lba[entry1], mbr))
+			{
+			    if (debug > 0)
+				grub_printf ("failure.\n");
+		            return 0;
+			} else {
+			    if (debug > 0)
+				grub_printf ("success.\n");
+			}
+		    }
+		}
+	}
+    }
+    else
+    {
+	if (current_drive >= 2)
+		return 1;
+
+	/* repair floppy BPB */
+
+	/* try to find out the filesystem type */
+	if (BS->boot_signature == 0xAA55 && ! probe_bpb(BS) && filesystem_type > 0)
+	{
+	    if (BS->total_heads != tmp_geom.heads || BS->sectors_per_track != tmp_geom.sectors)
+	    {
+		if (debug > 0)
+		    grub_printf ("Floppy %d: Changing H/S=%d/%d to H/S=%d/%d ... ", current_drive, BS->total_heads, BS->sectors_per_track, tmp_geom.heads, tmp_geom.sectors);
+		BS->total_heads = tmp_geom.heads;
+		BS->sectors_per_track = tmp_geom.sectors;
+
+		/* Write back/update the floppy boot sector.  */
+		if (! rawwrite (current_drive, 0, mbr))
+		{
+		    if (debug > 0)
+			grub_printf ("failure.\n");
+	            return 0;
+		} else {
+		    if (debug > 0)
+			grub_printf ("success.\n");
+		}
+	    }
+	}
+    }
+    return 1;
+#undef BS
+  }
+#endif
 
 #if 0
 	/* The situation described as follows should never occur. So comment
-	 * out. Another reson to comment out: the SCRATCHSEG has only 512
+	 * out. Another reason to comment out: the SCRATCHSEG has only 512
 	 * byte room and it cannot hold a large 2048-byte cdrom sector.
 	 *
 	 *		Commented out 2008-09-30 by Tinybit.
@@ -4271,7 +5959,7 @@ geometry_func (char *arg, int flags)
   if (*arg/*ptr*/)
     {
       char *cylinder, *head, *sector, *total_sector;
-      int num_cylinder, num_head, num_sector, num_total_sector;
+      unsigned long long num_cylinder, num_head, num_sector, num_total_sector;
 
       cylinder = arg/*ptr*/;
       head = skip_to (0, cylinder);
@@ -4309,10 +5997,10 @@ geometry_func (char *arg, int flags)
     msg = "CHS";
 #endif
 
-  grub_printf ("drive 0x%02X(%s): C/H/S=%d/%d/%d, Sector Count/Size=%d/%d\n",
+  grub_printf ("drive 0x%02X(%s): C/H/S=%d/%d/%d, Sector Count/Size=%ld/%d\n",
 	       current_drive, msg,
 	       tmp_geom.cylinders, tmp_geom.heads, tmp_geom.sectors,
-	       tmp_geom.total_sectors, tmp_geom.sector_size);
+	       (unsigned long long)tmp_geom.total_sectors, tmp_geom.sector_size);
 #ifdef GRUB_UTIL
   if (current_drive != cdrom_drive)
 #else
@@ -4329,13 +6017,24 @@ static struct builtin builtin_geometry =
   "geometry",
   geometry_func,
   BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
-  "geometry DRIVE [CYLINDER HEAD SECTOR [TOTAL_SECTOR]]",
-  "Print the information for a drive DRIVE. In the grub shell, you can"
+#ifdef GRUB_UTIL
+  "geometry [DRIVE] [CYLINDER HEAD SECTOR [TOTAL_SECTOR]]",
+  "Print the information for drive DRIVE or the current root device if DRIVE"
+  " is not specified. In the grub shell, you can"
   " set the geometry of the drive arbitrarily. The number of the cylinders,"
   " the one of the heads, the one of the sectors and the one of the total"
   " sectors are set to CYLINDER, HEAD, SECTOR and TOTAL_SECTOR,"
   " respectively. If you omit TOTAL_SECTOR, then it will be calculated based"
   " on the C/H/S values automatically."
+#else
+  "geometry [--tune] [--sync] [DRIVE]",
+  "Print the information for drive DRIVE or the current root device if DRIVE"
+  " is not specified. If --tune is specified, the geometry will change to the"
+  " tuned value. If --sync is specified, the C/H/S values in partition table"
+  " of DRIVE and H/S values in BPB of each primary partition of DRIVE"
+  "(or BPB of floppy DRIVE) will be updated according to the current"
+  " geometry of DRIVE in use."
+#endif /* GRUB_UTIL */
 };
 
 
@@ -4387,7 +6086,7 @@ help_func (char *arg, int flags)
       for (builtin = builtin_table; *builtin != 0; builtin++)
 	{
 	  int len;
-	  //int i;
+	  int i;
 
 	  /* If this cannot be used in the command-line interface,
 	     skip this.  */
@@ -4453,7 +6152,7 @@ help_func (char *arg, int flags)
 		  while (*doc)
 		    {
 		      int len = grub_strlen (doc);
-		      //int i;
+		      int i;
 
 		      /* If LEN is too long, fold DOC.  */
 		      if (len > MAX_LONG_DOC_LEN)
@@ -4496,6 +6195,22 @@ static int
 hiddenmenu_func (char *arg, int flags)
 {
   show_menu = 0;
+
+  while (*arg)
+  {
+    if (grub_memcmp (arg, "--silent", 8) == 0)
+      {
+        silent_hiddenmenu = 1;
+      }
+    else if (grub_memcmp (arg, "--off", 5) == 0)
+      {
+	/* set to the default values. */
+	show_menu = 1;
+        silent_hiddenmenu = 0;
+      }
+    arg = skip_to (0, arg);
+  }
+
   return 1;
 }
 
@@ -4505,7 +6220,7 @@ static struct builtin builtin_hiddenmenu =
   hiddenmenu_func,
   BUILTIN_MENU,
 #if 0
-  "hiddenmenu",
+  "hiddenmenu [--silent]",
   "Hide the menu."
 #endif
 };
@@ -4697,12 +6412,14 @@ static struct builtin builtin_initrd =
   "initrd",
   initrd_func,
   BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
-  "initrd FILE [ARG ...]",
+  "initrd FILE [FILE ...]",
   "Load an initial ramdisk FILE for a Linux format boot image and set the"
-  " appropriate parameters in the Linux setup area in memory."
+  " appropriate parameters in the Linux setup area in memory. For Linux"
+  " 2.6+ kernels, multiple cpio files can be loaded."
 };
 
 
+#ifdef GRUB_UTIL
 //#ifdef GRUB_UTIL
 //#define installaddr (*(unsigned long *)RAW_ADDR (0x100000))
 //#define installlist (*(unsigned long *)RAW_ADDR (0x100004))
@@ -4789,7 +6506,7 @@ install_func (char *arg, int flags)
   unsigned long dest_partition;
   unsigned long dest_sector;
   unsigned long src_drive, src_partition, src_part_start;
-//unsigned long i;
+  unsigned long i;
 //struct geometry dest_geom, src_geom;
   unsigned long stage2_first_sector, stage2_second_sector;
   char *ptr;
@@ -4801,6 +6518,9 @@ install_func (char *arg, int flags)
   int is_open = 0;
   /* If LBA is forced?  */
   int is_force_lba = 0;
+#ifndef NO_DECOMPRESSION
+  int no_decompression_bak = no_decompression;
+#endif
   /* Was the last sector full? */
   blklst_last_length = SECTOR_SIZE;
   
@@ -4846,15 +6566,21 @@ install_func (char *arg, int flags)
   addr = skip_to (0, file);
 
   /* Get the installation address.  */
-  if (! safe_parse_maxint (&addr, (int *)(void *)&installaddr))
-    {
-      /* ADDR is not specified.  */
-      installaddr = 0;
-      ptr = addr;
-      errnum = 0;
-    }
-  else
-    ptr = skip_to (0, addr);
+  {
+	unsigned long long ull;
+	if (! safe_parse_maxint (&addr, &ull))
+	{
+		/* ADDR is not specified.  */
+		installaddr = 0;
+		ptr = addr;
+		errnum = 0;
+	}
+	else
+	{
+		installaddr = ull;
+		ptr = skip_to (0, addr);
+	}
+  }
 
 #ifndef NO_DECOMPRESSION
   /* Do not decompress Stage 1 or Stage 2.  */
@@ -4864,20 +6590,20 @@ install_func (char *arg, int flags)
   /* Read Stage 1.  */
   is_open = grub_open (stage1_file);
   if (! is_open
-      || ! grub_read (stage1_buffer, SECTOR_SIZE) == SECTOR_SIZE)
+      || ! grub_read ((unsigned long long)(unsigned int)stage1_buffer, SECTOR_SIZE, 0xedde0d90) == SECTOR_SIZE)
     goto fail;
 
   /* Read the old sector from DEST_DEV.  */
   if (! set_device (dest_dev)
       || ! open_partition ()
-      || ! devread (0, 0, SECTOR_SIZE, old_sect))
+      || ! devread (0, 0, SECTOR_SIZE, (unsigned long long)(unsigned int)old_sect, 0xedde0d90))
     goto fail;
 
   /* Store the information for the destination device.  */
   dest_drive = current_drive;
   dest_partition = current_partition;
 //dest_geom = buf_geom;
-  dest_sector = part_start;
+  dest_sector = (unsigned long)part_start;
 
   /* Copy the possible DOS BPB, 59 bytes at byte offset 3.  */
   grub_memmove (stage1_buffer + BOOTSEC_BPB_OFFSET,
@@ -4920,7 +6646,7 @@ install_func (char *arg, int flags)
 
   src_drive = current_drive;
   src_partition = current_partition;
-  src_part_start = part_start;
+  src_part_start = (unsigned long)part_start;
 //src_geom = buf_geom;
   
   if (! new_drive)
@@ -4944,25 +6670,19 @@ install_func (char *arg, int flags)
     *((unsigned short *) (stage1_buffer + STAGE1_BOOT_DRIVE_CHECK))
       = 0x9090;
   
-  //printf ("stage2_first_buffer 6 =%X\n", stage2_first_buffer);
   /* Read the first sector of Stage 2.  */
   disk_read_hook = disk_read_savesect_func;
-  //printf ("stage2_first_buffer 61=%X\n", stage2_first_buffer);
-  if (grub_read (stage2_first_buffer, SECTOR_SIZE) != SECTOR_SIZE)
+  if (grub_read ((unsigned long long)(unsigned int)stage2_first_buffer, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
     goto fail;
 
-  //printf ("stage2_first_buffer 62=%X\n", stage2_first_buffer);
   stage2_first_sector = saved_sector;
   
-  //printf ("stage2_second_buffer 63=%X\n", stage2_second_buffer);
   /* Read the second sector of Stage 2.  */
-  if (grub_read (stage2_second_buffer, SECTOR_SIZE) != SECTOR_SIZE)
+  if (grub_read ((unsigned long long)(unsigned int)stage2_second_buffer, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
     goto fail;
 
-  //printf ("stage2_first_buffer 64=%X\n", stage2_first_buffer);
   stage2_second_sector = saved_sector;
   
-  //printf ("stage2_first_buffer 65=%X\n", stage2_first_buffer);
   /* Check for the version of Stage 2.  */
   if (*((short *) (stage2_second_buffer + STAGE2_VER_MAJ_OFFS))
       != COMPAT_VERSION)
@@ -4971,7 +6691,6 @@ install_func (char *arg, int flags)
       goto fail;
     }
 
-  //printf ("stage2_first_buffer 7 =%X\n", stage2_first_buffer);
   /* Check for the Stage 2 id.  */
   if (stage2_second_buffer[STAGE2_STAGE2_ID] != STAGE2_ID_STAGE2)
     is_stage1_5 = 1;
@@ -4995,7 +6714,6 @@ install_func (char *arg, int flags)
   *((unsigned short *) (stage1_buffer + STAGE1_STAGE2_SEGMENT))
     = installaddr >> 4;
 
-  //printf ("stage2_first_buffer 8 =%X\n", stage2_first_buffer);
   i = (unsigned long) stage2_first_buffer + SECTOR_SIZE - 4;
   while (*((unsigned long *) i))
     {
@@ -5020,7 +6738,7 @@ install_func (char *arg, int flags)
   filepos = SECTOR_SIZE;
 
   disk_read_hook = disk_read_blocklist_func1;
-  if (! grub_read (dummy, -1))
+  if (! grub_read ((unsigned long long)(unsigned int)dummy, -1ULL, 0xedde0d90))
     goto fail;
   
   disk_read_hook = 0;
@@ -5103,7 +6821,7 @@ install_func (char *arg, int flags)
 	  filepos = SECTOR_SIZE;
 	  
 	  disk_read_hook = disk_read_savesect_func;
-	  if (grub_read (stage2_buffer, SECTOR_SIZE) != SECTOR_SIZE)
+	  if (grub_read ((unsigned long long)(unsigned int)stage2_buffer, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
 	    goto fail;
 	  
 	  disk_read_hook = 0;
@@ -5172,7 +6890,7 @@ install_func (char *arg, int flags)
 	  else
 #endif /* GRUB_UTIL */
 	    {
-	      if (! devwrite (saved_sector - part_start, 1, stage2_buffer))
+	      if (! devwrite ((unsigned long)(saved_sector - part_start), 1, stage2_buffer))
 		goto fail;
 	    }
 	}
@@ -5244,7 +6962,7 @@ install_func (char *arg, int flags)
   disk_read_hook = 0;
   
 #ifndef NO_DECOMPRESSION
-  no_decompression = 0;
+  no_decompression = no_decompression_bak;
 #endif
 
 //  if (debug > 0)
@@ -5273,6 +6991,7 @@ static struct builtin builtin_install =
   " for LBA mode. If the option `--stage2' is specified, rewrite the Stage"
   " 2 via your OS's filesystem instead of the raw device."
 };
+#endif /* GRUB_UTIL */
 
 
 /* is64bit */
@@ -5474,7 +7193,7 @@ makeactive_func (char *arg, int flags)
     }
 
   /* Read the MBR in the scratch space.  */
-  if (! rawread (current_drive, 0, 0, SECTOR_SIZE, mbr))
+  if (! rawread (current_drive, 0, 0, SECTOR_SIZE, (unsigned long long)(unsigned long)mbr, 0xedde0d90))
 	return 0;
 
   /* If the partition is an extended partition, setting the active
@@ -5489,7 +7208,7 @@ makeactive_func (char *arg, int flags)
     {
 	int active = (PC_SLICE_FLAG (mbr, part) == PC_SLICE_FLAG_BOOTABLE);
 	if (debug > 0)
-		grub_printf ("Partition (hd%d,%d) is %sactive.\n", (current_drive & 0x7F), part, (active ? "" : "not "));
+		grub_printf ("Partition (hd%d,%d) is %sactive.\n", (current_drive & 0x7F), part, ((active ? "" : "not ")));
 		
 	return active;
     }
@@ -5535,7 +7254,8 @@ static struct builtin builtin_makeactive =
 
 
 #ifndef GRUB_UTIL
-static unsigned long start_sector, sector_count;
+static unsigned long long start_sector, sector_count;
+unsigned long long initrd_start_sector;
 
   /* Get the start sector number of the file.  */
 static void disk_read_start_sector_func (unsigned long sector, unsigned long offset, unsigned long length);
@@ -5554,13 +7274,14 @@ static void
 print_bios_total_drives(void)
 {	
 	grub_printf ("\nfloppies_orig=%d, harddrives_orig=%d, floppies_curr=%d, harddrives_curr=%d\n", 
-			(floppies_orig & 1)?(floppies_orig >> 6) + 1 : 0, harddrives_orig,
-			((*(char*)0x410) & 1)?((*(char*)0x410) >> 6) + 1 : 0, *(char*)0x475);
+			((floppies_orig & 1)?(floppies_orig >> 6) + 1 : 0), harddrives_orig,
+			(((*(char*)0x410) & 1)?((*(char*)0x410) >> 6) + 1 : 0), (*(char*)0x475));
 }
 
 #endif
   
 unsigned long probed_total_sectors;
+unsigned long probed_total_sectors_round;
 unsigned long probed_heads;
 unsigned long probed_sectors_per_track;
 unsigned long probed_cylinders;
@@ -5596,18 +7317,18 @@ unsigned long Z;
 int
 probe_bpb (struct master_and_dos_boot_sector *BS)
 {
+  unsigned long i;
+
   /* first, check ext2 grldr boot sector */
   probed_total_sectors = BS->total_sectors_long;
 
   /* at 0D: (byte)Sectors per block. Valid values are 2, 4, 8, 16 and 32. */
-  
   if (BS->sectors_per_cluster < 2 || 32 % BS->sectors_per_cluster)
 	goto failed_ext2_grldr;
 
   /* at 0E: (word)Bytes per block.
    * Valid values are 0x400, 0x800, 0x1000, 0x2000 and 0x4000.
    */
-  
   if (BS->reserved_sectors != BS->sectors_per_cluster * 0x200)
 	goto failed_ext2_grldr;
   
@@ -5715,24 +7436,30 @@ failed_ext2_grldr:
 int
 probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, unsigned long sector_count1, unsigned long part_start1)
 {
-  unsigned long j;
+  unsigned long i, j;
+  unsigned long lba_total_sectors = 0;
   
   /* probe the partition table */
   
   Cmax = 0; Hmax = 0; Smax = 0;
   for (i = 0; i < 4; i++)
     {
+      int *part_entry;
       /* the boot indicator must be 0x80 (for bootable) or 0 (for non-bootable) */
       if ((unsigned char)(BS->P[i].boot_indicator << 1))/* if neither 0x80 nor 0 */
 	return 1;
       /* check if the entry is empty, i.e., all the 16 bytes are 0 */
-      if (*(long long *)(void *)&(BS->P[i].boot_indicator) || *(long long *)(void *)&(BS->P[i].start_lba))
+      part_entry = (int *)&(BS->P[i].boot_indicator);
+      if (*part_entry++ || *part_entry++ || *part_entry++ || *part_entry)
+      //if (*(long long *)&BS->P[i] || ((long long *)&BS->P[i])[1])
         {
 	  /* valid partitions never start at 0, because this is where the MBR
 	   * lives; and more, the number of total sectors should be non-zero.
 	   */
 	  if (! BS->P[i].start_lba || ! BS->P[i].total_sectors)
 		return 2;
+	  if (lba_total_sectors < BS->P[i].start_lba+BS->P[i].total_sectors)
+	      lba_total_sectors = BS->P[i].start_lba+BS->P[i].total_sectors;
 	  /* the partitions should not overlap each other */
 	  for (j = 0; j < i; j++)
 	  {
@@ -5756,8 +7483,8 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 	  if (Smax < X)
 		  Smax = X;
 	  /* the sector number should not be 0. */
-	  /* partitions should not start at the first track, the MBR-track */
-	  if (! X || BS->P[i].start_lba < Smax/* X - 1 */)
+	  ///* partitions should not start at the first track, the MBR-track */
+	  if (! X /* || BS->P[i].start_lba < Smax */)
 		return 4;
 	  L[i] = BS->P[i].start_lba - X + 1;
 	  if (start_sector1 == part_start1)/* extended partition is pretending to be a whole drive */
@@ -5793,10 +7520,8 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 		/* && C[i] * (Hmax + 1) * 63 + H[i] * 63 + X - 1 == BS->P[i].start_lba */
 	     )
 	  {
-//grub_printf ("LargeDiskWin98_001 i=%d, C[i]=%d, Hmax=%d, H[i]=%d, L[i]=%d\n", i, C[i], Hmax, H[i], L[i]);
 		if (C[i] * (Hmax+1) * 63 + H[i] * 63 > L[i])
 			return 7;
-//grub_printf ("LargeDiskWin98_002 i=%d\n", i);
 		if (C[i] * (Hmax+1) * 63 + H[i] * 63 < L[i])
 		{
 		  /* calculate CHS numbers from start LBA */
@@ -5807,7 +7532,6 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 		  if (C[i] != (((unsigned long)L[i]/63/(Hmax+1)) & 0x3ff) && C[i] != Cmax)
 			return 10;
 		}
-//grub_printf ("LargeDiskWin98_003 i=%d\n", i);
 		C[i] = 0; 
 		H[i] = 1; 
 		L[i] = 63;
@@ -5823,19 +7547,15 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 		&& ((((unsigned long)L[i+4] + Y) / ((Hmax + 1) * 63) - 1) & 0x3ff) == C[i+4]
 	     )
 	  {
-//grub_printf ("LargeDiskWin2K_001 i=%d\n", i);
 		if (C[i] * (Hmax+1) * 63 + H[i] * 63 > L[i])
 			return 11;
-//grub_printf ("LargeDiskWin2K_002 i=%d\n", i);
 		if (C[i] * (Hmax+1) * 63 + H[i] * 63 < L[i])
 		{
 			if (((unsigned long)L[i] - H[i] * 63) % ((Hmax+1) * 63))
 				return 12;
-//grub_printf ("LargeDiskWin2K_003 i=%d\n", i);
 			if (((((unsigned long)L[i] - H[i] * 63) / ((Hmax+1) * 63)) & 0x3ff) != C[i])
 				return 13;
 		}
-//grub_printf ("LargeDiskWin2K_004 i=%d\n", i);
 		C[i] = 0; 
 		H[i] = 1; 
 		L[i] = 63;
@@ -5956,7 +7676,8 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 		  probed_cylinders = 1; 
 	}
       sectors_per_cylinder = probed_heads * probed_sectors_per_track;
-      probed_total_sectors = sectors_per_cylinder * probed_cylinders;
+      probed_total_sectors_round = sectors_per_cylinder * probed_cylinders;
+      probed_total_sectors = lba_total_sectors;
     }
   else
     {
@@ -6041,7 +7762,8 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
       probed_cylinders = (sector_count1 + sectors_per_cylinder - 1) / sectors_per_cylinder;
       if (probed_cylinders < Cmax + 1)
 	      probed_cylinders = Cmax + 1;
-      probed_total_sectors = sectors_per_cylinder * probed_cylinders;
+      probed_total_sectors_round = sectors_per_cylinder * probed_cylinders;
+      probed_total_sectors = lba_total_sectors;
     }
 
   
@@ -6054,14 +7776,18 @@ probe_mbr (struct master_and_dos_boot_sector *BS, unsigned long start_sector1, u
 //#include "fat.h"
 
 #ifndef GRUB_UTIL
+
+unsigned long long map_mem_min = 0x100000;
+unsigned long long map_mem_max = (-4096ULL);
+
 /* map */
 /* Map FROM_DRIVE to TO_DRIVE.  */
-static int
+int
 map_func (char *arg, int flags)
 {
   char *to_drive;
   char *from_drive;
-  unsigned long to, from;
+  unsigned long to, from, i = 0;
   int j;
   char *filename;
   char *p;
@@ -6073,17 +7799,20 @@ map_func (char *arg, int flags)
   //struct master_and_dos_boot_sector *BS = (struct master_and_dos_boot_sector *) RAW_ADDR (0x8000);
 #define	BS	((struct master_and_dos_boot_sector *)mbr)
 
-  int mem = -1;
+  unsigned long long mem = -1ULL;
   int read_Only = 0;
   int fake_write = 0;
   int unsafe_boot = 0;
   int disable_lba_mode = 0;
   int disable_chs_mode = 0;
-  int sectors_per_track = -1;
-  int heads_per_cylinder = -1;
+  unsigned long long sectors_per_track = -1ULL;
+  unsigned long long heads_per_cylinder = -1ULL;
+  unsigned long long to_filesize = 0;
   unsigned long BPB_H = 0;
   unsigned long BPB_S = 0;
   int in_situ = 0;
+  int add_mbt = -1;
+  int prefer_top = 0;
   filesystem_type = -1;
   start_sector = sector_count = 0;
   
@@ -6098,16 +7827,12 @@ map_func (char *arg, int flags)
 	  printf ("\nNumber of ATAPI CD-ROMs: %d\n", atapi_dev_count);
 	}
 #endif
-//	grub_printf ("\nsizeof(struct fat_bpb)=0x%x\n", sizeof(struct fat_bpb)); 
-//	grub_printf ("\nsizeof(struct master_and_dos_boot_sector)=0x%x\n", sizeof(struct master_and_dos_boot_sector)); 
 
-	if (rd_base != 0xffffffff)
-//	  if (debug > 0)
-	    grub_printf ("\nram_drive=0x%X, rd_base=0x%X, rd_size=0x%X\n", ram_drive, rd_base, rd_size); 
+	if (rd_base != -1ULL)
+	    grub_printf ("\nram_drive=0x%X, rd_base=0x%lX, rd_size=0x%lX\n", ram_drive, rd_base, rd_size); 
 	if (unset_int13_handler (1) && drive_map_slot_empty (bios_drive_map[0]))
 	  {
-//	    if (debug > 0)
-	      grub_printf ("\nThe int13 hook is off. The drive map table is currently empty.\n");
+	    grub_printf ("\nThe int13 hook is off. The drive map table is currently empty.\n");
 	    return 1;
 	  }
 
@@ -6151,8 +7876,8 @@ map_func (char *arg, int flags)
 
 	/* From To MaxHead MaxSector ToMaxCylinder ToMaxHead ToMaxSector StartLBA_lo StartLBA_hi Sector_count_lo Sector_count_hi Hook Type */
 //	if (debug > 0)
-	  grub_printf ("\nFr To Hm Sm To_C _H _S Start_lo Start_hi Count_lo Count_hi DHR"
-		       "\n-- -- -- -- ---- -- -- -------- -------- -------- -------- ---\n");
+	  grub_printf ("\nFr To Hm Sm To_C _H _S   Start_Sector     Sector_Count   DHR"
+		       "\n-- -- -- -- ---- -- -- ---------------- ---------------- ---\n");
 	if (! unset_int13_handler (1))
 	  for (i = 0; i < DRIVE_MAP_SIZE; i++)
 	    {
@@ -6164,7 +7889,7 @@ map_func (char *arg, int flags)
 			break;
 		  }
 //		if (debug > 0)
-		  grub_printf ("%02X %02X %02X %02X %04X %02X %02X %08X %08X %08X %08X %c%c%c\n", hooked_drive_map[i].from_drive, hooked_drive_map[i].to_drive, hooked_drive_map[i].max_head, hooked_drive_map[i].max_sector, hooked_drive_map[i].to_cylinder, hooked_drive_map[i].to_head, hooked_drive_map[i].to_sector, hooked_drive_map[i].start_sector, hooked_drive_map[i].start_sector_hi, hooked_drive_map[i].sector_count, hooked_drive_map[i].sector_count_hi, (hooked_drive_map[i].to_cylinder & 0x4000) ? 'C' : hooked_drive_map[i].to_drive < 0x80 ? 'F' : hooked_drive_map[i].to_drive == 0xFF ? 'M' : 'H', (j < DRIVE_MAP_SIZE) ? '=' : '>', (hooked_drive_map[i].max_sector & 0x80) ? ((hooked_drive_map[i].to_sector & 0x40) ? 'F' : 'R') :((hooked_drive_map[i].to_sector & 0x40) ? 'S' : 'U'));
+		  grub_printf ("%02X %02X %02X %02X %04X %02X %02X %016lX %016lX %c%c%c\n", hooked_drive_map[i].from_drive, hooked_drive_map[i].to_drive, hooked_drive_map[i].max_head, hooked_drive_map[i].max_sector, hooked_drive_map[i].to_cylinder, hooked_drive_map[i].to_head, hooked_drive_map[i].to_sector, (unsigned long long)hooked_drive_map[i].start_sector, (unsigned long long)hooked_drive_map[i].sector_count, ((hooked_drive_map[i].to_cylinder & 0x4000) ? 'C' : hooked_drive_map[i].to_drive < 0x80 ? 'F' : hooked_drive_map[i].to_drive == 0xFF ? 'M' : 'H'), ((j < DRIVE_MAP_SIZE) ? '=' : '>'), ((hooked_drive_map[i].max_sector & 0x80) ? ((hooked_drive_map[i].to_sector & 0x40) ? 'F' : 'R') :((hooked_drive_map[i].to_sector & 0x40) ? 'S' : 'U')));
 	    }
 	for (i = 0; i < DRIVE_MAP_SIZE; i++)
 	  {
@@ -6181,18 +7906,53 @@ map_func (char *arg, int flags)
 			continue;
 	      }
 //	    if (debug > 0)
-		  grub_printf ("%02X %02X %02X %02X %04X %02X %02X %08X %08X %08X %08X %c<%c\n", bios_drive_map[i].from_drive, bios_drive_map[i].to_drive, bios_drive_map[i].max_head, bios_drive_map[i].max_sector, bios_drive_map[i].to_cylinder, bios_drive_map[i].to_head, bios_drive_map[i].to_sector, bios_drive_map[i].start_sector, bios_drive_map[i].start_sector_hi, bios_drive_map[i].sector_count, bios_drive_map[i].sector_count_hi, (bios_drive_map[i].to_cylinder & 0x4000) ? 'C' : bios_drive_map[i].to_drive < 0x80 ? 'F' : bios_drive_map[i].to_drive == 0xFF ? 'M' : 'H', (bios_drive_map[i].max_sector & 0x80) ? ((bios_drive_map[i].to_sector & 0x40) ? 'F' : 'R') :((bios_drive_map[i].to_sector & 0x40) ? 'S' : 'U'));
+		  grub_printf ("%02X %02X %02X %02X %04X %02X %02X %016lX %016lX %c<%c\n", bios_drive_map[i].from_drive, bios_drive_map[i].to_drive, bios_drive_map[i].max_head, bios_drive_map[i].max_sector, bios_drive_map[i].to_cylinder, bios_drive_map[i].to_head, bios_drive_map[i].to_sector, (unsigned long long)bios_drive_map[i].start_sector, (unsigned long long)bios_drive_map[i].sector_count, ((bios_drive_map[i].to_cylinder & 0x4000) ? 'C' : bios_drive_map[i].to_drive < 0x80 ? 'F' : bios_drive_map[i].to_drive == 0xFF ? 'M' : 'H'), ((bios_drive_map[i].max_sector & 0x80) ? ((bios_drive_map[i].to_sector & 0x40) ? 'F' : 'R') :((bios_drive_map[i].to_sector & 0x40) ? 'S' : 'U')));
 	  }
 	return 1;
       }
     else if (grub_memcmp (arg, "--hook", 6) == 0)
       {
+	unsigned long long first_entry = -1ULL;
+
+	p = arg + 6;
+	if (*p == '=')
+	{
+		p++;
+		if (! safe_parse_maxint (&p, &first_entry))
+			return 0;
+		if (first_entry > 0xFF)
+			return ! (errnum = ERR_BAD_ARGUMENT);
+	}
 	unset_int13_handler (0);
 	//if (! unset_int13_handler (1))
 	//	return ! (errnum = ERR_INT13_ON_HOOK);
 	if (drive_map_slot_empty (bios_drive_map[0]))
 	    if (atapi_dev_count == 0)
 		return ! (errnum = ERR_NO_DRIVE_MAPPED);
+	if (first_entry <= 0xFF)
+	{
+	    /* setup first entry */
+	    /* find first_entry in bios_drive_map */
+	    for (i = 0; i < DRIVE_MAP_SIZE - 1; i++)
+	    {
+		if (drive_map_slot_empty (bios_drive_map[i]))
+			break;	/* not found */
+		if (bios_drive_map[i].from_drive == first_entry)
+		{
+			/* found */
+			/* nothing to do if it is already the first entry */
+			if (i == 0)
+				break;
+			/* backup this entry onto hooked_drive_map[0] */
+			grub_memmove ((char *) &hooked_drive_map[0], (char *) &bios_drive_map[i], sizeof (struct drive_map_slot));
+			/* move top entries downward */
+			grub_memmove ((char *) &bios_drive_map[1], (char *) &bios_drive_map[0], sizeof (struct drive_map_slot) * i);
+			/* restore this entry onto bios_drive_map[0] from hooked_drive_map[0] */
+			grub_memmove ((char *) &bios_drive_map[0], (char *) &hooked_drive_map[0], sizeof (struct drive_map_slot));
+			break;
+		}
+	    }
+	}
 	set_int13_handler (bios_drive_map);
 	buf_drive = -1;
 	buf_track = -1;
@@ -6208,6 +7968,29 @@ map_func (char *arg, int flags)
 	buf_track = -1;
 	return 1;
       }
+    else if (grub_memcmp (arg, "--unmap=", 8) == 0)
+      {
+	int drive;
+	char map_tmp[32];
+
+	p = arg + 8;
+	for (drive = 0xFF; drive >= 0; drive--)
+	{
+		if (drive != INITRD_DRIVE && in_range (p, drive)
+		#ifdef FSYS_FB
+		&& drive != FB_DRIVE
+		#endif
+		)
+		{
+			/* unmap drive */
+			sprintf (map_tmp, "(0x%X) (0x%X)", drive, drive);
+			map_func (map_tmp, flags);
+		}
+	}
+	buf_drive = -1;
+	buf_track = -1;
+	return 1;
+      }
     else if (grub_memcmp (arg, "--rehook", 8) == 0)
       {
 	//if (unset_int13_handler (1))
@@ -6217,23 +8000,63 @@ map_func (char *arg, int flags)
 	if (drive_map_slot_empty (bios_drive_map[0]))
 	    if (atapi_dev_count == 0)
 		return 1;//! (errnum = ERR_NO_DRIVE_MAPPED);
-	set_int13_handler (bios_drive_map);	/* backup bios_drive_map onto hooked_drive_map */
-	unset_int13_handler (0);	/* unhook it to avoid further access of hooked_drive_map by the call to map_func */
-	/* delete all memory mappings in bios_drive_map */
-	for (i = 0; i < DRIVE_MAP_SIZE - 1; i--)
+//	set_int13_handler (bios_drive_map);	/* backup bios_drive_map onto hooked_drive_map */
+//	unset_int13_handler (0);	/* unhook it to avoid further access of hooked_drive_map by the call to map_func */
+//	/* delete all memory mappings in hooked_drive_map */
+//	for (i = 0; i < DRIVE_MAP_SIZE - 1; i++)
+//	{
+//	    while (hooked_drive_map[i].to_drive == 0xFF && !(hooked_drive_map[i].to_cylinder & 0x4000))
+//	    {
+//		grub_memmove ((char *) &hooked_drive_map[i], (char *) &hooked_drive_map[i + 1], sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE - i));
+//	    }
+//	}
+	/* clear hooked_drive_map */
+	grub_memset ((char *) hooked_drive_map, 0, sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE));
+
+	/* re-create (topdown) all memory map entries in hooked_drive_map from bios_drive_map */
+	for (j = 0; j < DRIVE_MAP_SIZE - 1; j++)
 	{
-	    while (bios_drive_map[i].to_drive == 0xFF && !(bios_drive_map[i].to_cylinder & 0x4000))
+	    unsigned long long top_start = 0;
+	    unsigned long top_entry = DRIVE_MAP_SIZE;
+	    /* find the top memory mapping in bios_drive_map */
+	    for (i = 0; i < DRIVE_MAP_SIZE - 1; i++)
 	    {
-		grub_memmove ((char *) &bios_drive_map[i], (char *) &bios_drive_map[i + 1], sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE - i));
+		if (bios_drive_map[i].to_drive == 0xFF && !(bios_drive_map[i].to_cylinder & 0x4000))
+		{
+			if (top_start < bios_drive_map[i].start_sector)
+			{
+			    top_start = bios_drive_map[i].start_sector;
+			    top_entry = i;
+			}
+		}
 	    }
+	    if (top_entry >= DRIVE_MAP_SIZE)	/* not found */
+		break;				/* end */
+	    /* move it to hooked_drive_map, by a copy and a delete */
+	    grub_memmove ((char *) &hooked_drive_map[j], (char *) &bios_drive_map[top_entry], sizeof (struct drive_map_slot));
+	    grub_memmove ((char *) &bios_drive_map[top_entry], (char *) &bios_drive_map[top_entry + 1], sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE - top_entry));
 	}
+	/* now there should be no memory mappings in bios_drive_map. */
+
+//	/* delete all memory mappings in bios_drive_map */
+//	for (i = 0; i < DRIVE_MAP_SIZE - 1; i++)
+//	{
+//	    while (bios_drive_map[i].to_drive == 0xFF && !(bios_drive_map[i].to_cylinder & 0x4000))
+//	    {
+//		grub_memmove ((char *) &bios_drive_map[i], (char *) &bios_drive_map[i + 1], sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE - i));
+//	    }
+//	}
 	/* re-create all memory mappings stored in hooked_drive_map */
 	for (i = 0; i < DRIVE_MAP_SIZE - 1; i++)
 	{
 	    if (hooked_drive_map[i].to_drive == 0xFF && !(hooked_drive_map[i].to_cylinder & 0x4000))
 	    {
 		char tmp[128];
-		sprintf (tmp, "--heads=%d --sectors-per-track=%d (md)0x%X+0x%X (0x%X)", hooked_drive_map[i].max_head + 1, (hooked_drive_map[i].max_sector) & 63, hooked_drive_map[i].start_sector, hooked_drive_map[i].sector_count, hooked_drive_map[i].from_drive);
+#ifndef NO_DECOMPRESSION
+		int no_decompression_bak = no_decompression;
+		int is64bit_bak = is64bit;
+#endif
+		sprintf (tmp, "--heads=%d --sectors-per-track=%d (md)0x%lX+0x%lX (0x%X)", (hooked_drive_map[i].max_head + 1), ((hooked_drive_map[i].max_sector) & 63), (unsigned long long)hooked_drive_map[i].start_sector, (unsigned long long)hooked_drive_map[i].sector_count, hooked_drive_map[i].from_drive);
 
 		if (debug > 1)
 		{
@@ -6241,7 +8064,21 @@ map_func (char *arg, int flags)
 		}
 		errnum = 0;
 		disable_map_info = 1;
+#ifndef NO_DECOMPRESSION
+		if (hooked_drive_map[i].from_drive == INITRD_DRIVE)
+		{
+			no_decompression = 1;
+			is64bit = 0;
+		}
+#endif
 		map_func (tmp, flags);
+#ifndef NO_DECOMPRESSION
+		if (hooked_drive_map[i].from_drive == INITRD_DRIVE)
+		{
+			no_decompression = no_decompression_bak;
+			is64bit = is64bit_bak;
+		}
+#endif
 		disable_map_info = 0;
 
 		if (errnum)
@@ -6253,10 +8090,12 @@ map_func (char *arg, int flags)
 			return 0;
 		}
 
+		if (hooked_drive_map[i].from_drive == INITRD_DRIVE)
+			linux_header->ramdisk_image = RAW_ADDR (initrd_start_sector << 9);
 		/* change the map options */
 		for (j = 0; j < DRIVE_MAP_SIZE - 1; j++)
 		{
-			if (bios_drive_map[j].from_drive == hooked_drive_map[i].from_drive && bios_drive_map[j].to_drive == 0xFF)
+			if (bios_drive_map[j].from_drive == hooked_drive_map[i].from_drive && bios_drive_map[j].to_drive == 0xFF && !(bios_drive_map[j].to_cylinder & 0x4000))
 			{
 				bios_drive_map[j].max_head	= hooked_drive_map[i].max_head;
 				bios_drive_map[j].max_sector	= hooked_drive_map[i].max_sector;
@@ -6275,11 +8114,11 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--floppies=", 11) == 0)
       {
-	int floppies;
+	unsigned long long floppies;
 	p = arg + 11;
 	if (! safe_parse_maxint (&p, &floppies))
 		return 0;
-	if (floppies < 0 || floppies > 2)
+	if (floppies > 2)
 		return ! (errnum = ERR_INVALID_FLOPPIES);
 #ifndef GRUB_UTIL
 	*((char *)0x410) &= 0x3e;
@@ -6290,11 +8129,11 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--harddrives=", 13) == 0)
       {
-	int harddrives;
+	unsigned long long harddrives;
 	p = arg + 13;
 	if (! safe_parse_maxint (&p, &harddrives))
 		return 0;
-	if (harddrives < 0 || harddrives > 127)
+	if (harddrives > 127)
 		return ! (errnum = ERR_INVALID_HARDDRIVES);
 #ifndef GRUB_UTIL
 	*((char *)0x475) = harddrives;
@@ -6303,11 +8142,11 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--ram-drive=", 12) == 0)
       {
-	int tmp;
+	unsigned long long tmp;
 	p = arg + 12;
 	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
-	if (tmp < 0 || tmp > 254)
+	if (tmp > 254)
 		return ! (errnum = ERR_INVALID_RAM_DRIVE);
 	ram_drive = tmp;
 	
@@ -6315,9 +8154,9 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--rd-base=", 10) == 0)
       {
-	int tmp;
+	unsigned long long tmp;
 	p = arg + 10;
-	if (! safe_parse_maxint (&p, &tmp))
+	if (! safe_parse_maxint_with_suffix (&p, &tmp, 9))
 		return 0;
 //	if (tmp == 0xffffffff)
 //		return ! (errnum = ERR_INVALID_RD_BASE);
@@ -6327,9 +8166,9 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--rd-size=", 10) == 0)
       {
-	int tmp;
+	unsigned long long tmp;
 	p = arg + 10;
-	if (! safe_parse_maxint (&p, &tmp))
+	if (! safe_parse_maxint_with_suffix (&p, &tmp, 9))
 		return 0;
 //	if (tmp == 0)
 //		return ! (errnum = ERR_INVALID_RD_SIZE);
@@ -6339,43 +8178,84 @@ map_func (char *arg, int flags)
       }
     else if (grub_memcmp (arg, "--memdisk-raw=", 14) == 0)
       {
+	unsigned long long tmp;
 	p = arg + 14;
-	if (! safe_parse_maxint (&p, (int *)(void *)&memdisk_raw))
+	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
+	memdisk_raw = tmp;
 	return 1;
       }
     else if (grub_memcmp (arg, "--a20-keep-on=", 14) == 0)
       {
+	unsigned long long tmp;
 	p = arg + 14;
-	if (! safe_parse_maxint (&p, (int *)(void *)&a20_keep_on))
+	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
+	a20_keep_on = tmp;
 	return 1;
       }
     else if (grub_memcmp (arg, "--safe-mbr-hook=", 16) == 0)
       {
+	unsigned long long tmp;
 	p = arg + 16;
-	if (! safe_parse_maxint (&p, (int *)(void *)&safe_mbr_hook))
+	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
+	safe_mbr_hook = tmp;
 	return 1;
       }
     else if (grub_memcmp (arg, "--int13-scheme=", 15) == 0)
       {
+	unsigned long long tmp;
 	p = arg + 15;
-	if (! safe_parse_maxint (&p, (int *)(void *)&int13_scheme))
+	if (! safe_parse_maxint (&p, &tmp))
 		return 0;
+	int13_scheme = tmp;
+	return 1;
+      }
+    else if (grub_memcmp (arg, "--mem-max=", 10) == 0)
+      {
+	unsigned long long num;
+	p = arg + 10;
+	if (! safe_parse_maxint_with_suffix (&p, &num, 9))
+		return 0;
+	map_mem_max = (num<<9) & (-4096ULL); // convert to bytes, 4KB alignment, round down
+	if (is64bit) {
+	  if (map_mem_max==0)
+	      map_mem_max = (-4096ULL);
+	} else {
+	  if (map_mem_max==0 || map_mem_max>(1ULL<<32))
+	      map_mem_max = (1ULL<<32); // 4GB
+	}
+	grub_printf("map_mem_max = 0x%lX sectors = 0x%lX bytes\n",map_mem_max>>9,map_mem_max);
+	return 1;
+      }
+    else if (grub_memcmp (arg, "--mem-min=", 10) == 0)
+      {
+	unsigned long long num;
+	p = arg + 10;
+	if (! safe_parse_maxint_with_suffix (&p, &num, 9))
+		return 0;
+	map_mem_min = (((num<<9)+4095)&(-4096ULL)); // convert to bytes, 4KB alignment, round up
+	if (map_mem_min < (1ULL<<20))
+	    map_mem_min = (1ULL<<20); // 1MB
+	grub_printf("map_mem_min = 0x%lX sectors = 0x%lX bytes\n",map_mem_min>>9,map_mem_min);
 	return 1;
       }
     else if (grub_memcmp (arg, "--mem=", 6) == 0)
       {
 	p = arg + 6;
-	if (! safe_parse_maxint (&p, &mem))
+	if (! safe_parse_maxint_with_suffix (&p, &mem, 9))
 		return 0;
-	if (mem == -1)
-		mem = -2;//return errnum = ERR_INVALID_MEM_RESERV;
+	if (mem == -1ULL)
+		mem = -2ULL;//return errnum = ERR_INVALID_MEM_RESERV;
       }
     else if (grub_memcmp (arg, "--mem", 5) == 0)
       {
 	mem = 0;
+      }
+    else if (grub_memcmp (arg, "--top", 5) == 0)
+      {
+	prefer_top = 1;
       }
     else if (grub_memcmp (arg, "--read-only", 11) == 0)
       {
@@ -6418,26 +8298,26 @@ map_func (char *arg, int flags)
 	p = arg + 8;
 	if (! safe_parse_maxint (&p, &heads_per_cylinder))
 		return 0;
-	if (heads_per_cylinder < 0 || heads_per_cylinder > 256)
+	if ((unsigned long long)heads_per_cylinder > 256)
 		return ! (errnum = ERR_INVALID_HEADS);
       }
-//  else if (grub_memcmp (arg, "--heads-per-cylinder=", 21) == 0)
-//    {
-//	grub_printf ("\nThe option --heads-per-cylinder is now deprecated.\n\n"
-//		     "Next time, please use --heads instead. Compatibility will be removed soon.\n\n");
-//	p = arg + 21;
-//	if (! safe_parse_maxint (&p, &heads_per_cylinder))
-//		return 0;
-//	if (heads_per_cylinder < 0 || heads_per_cylinder > 256)
-//		return ! (errnum = ERR_INVALID_HEADS);
-//    }
     else if (grub_memcmp (arg, "--sectors-per-track=", 20) == 0)
       {
 	p = arg + 20;
 	if (! safe_parse_maxint (&p, &sectors_per_track))
 		return 0;
-	if (sectors_per_track < 0 || sectors_per_track > 63)
+	if ((unsigned long long)sectors_per_track > 63)
 		return ! (errnum = ERR_INVALID_SECTORS);
+      }
+    else if (grub_memcmp (arg, "--add-mbt=", 10) == 0)
+      {
+	unsigned long long num;
+	p = arg + 10;
+	if (! safe_parse_maxint (&p, &num))
+		return 0;
+	add_mbt = num;
+	if (add_mbt < -1 || add_mbt > 1)
+		return 0;
       }
     else
 	break;
@@ -6447,11 +8327,18 @@ map_func (char *arg, int flags)
   to_drive = arg;
   from_drive = skip_to (0, arg);
 
+//  if (grub_memcmp (from_drive, "(hd+)", 5) == 0)
+//  {
+//	from = (unsigned char)(0x80 + (*(unsigned char *)0x475));
+//  }
+//  else
+//  {
   /* Get the drive number for FROM_DRIVE.  */
   set_device (from_drive);
   if (errnum)
     return 0;
   from = current_drive;
+//  }
 
   if (! (from & 0x80) && in_situ)
 	return ! (errnum = ERR_IN_SITU_FLOPPY);
@@ -6467,6 +8354,8 @@ map_func (char *arg, int flags)
   }
   
   to = current_drive;
+  if (to == FB_DRIVE)
+    to = (unsigned char)(fb_status >> 8)/* & 0xff*/;
 
   if (! (to & 0x80) && in_situ)
 	return ! (errnum = ERR_IN_SITU_FLOPPY);
@@ -6474,13 +8363,12 @@ map_func (char *arg, int flags)
   /* if mem device is used, assume the --mem option */
   if (to == 0xffff || to == ram_drive || from == ram_drive)
   {
-	if (mem == -1)
+	if (mem == -1ULL)
 		mem = 0;
   }
 
-  if (mem != -1 && in_situ)
+  if (mem != -1ULL && in_situ)
 	return ! (errnum = ERR_IN_SITU_MEM);
-//grub_printf ("0: part_start=%d, part_length=%d\n", part_start, part_length);
 
   if (in_situ == 1)
   {
@@ -6496,7 +8384,7 @@ map_func (char *arg, int flags)
 	if (! grub_open (buf))
 		return 0;
 
-	if (grub_read ((char *)SCRATCHADDR, SECTOR_SIZE) != SECTOR_SIZE)
+	if (grub_read ((unsigned long long)SCRATCHADDR, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
 	{
 		grub_close ();
 
@@ -6530,16 +8418,16 @@ map_func (char *arg, int flags)
 		return ! (errnum = ERR_PARTITION_TABLE_FULL);
   }
   
-  if (current_partition == 0xFFFFFF && filename && (*filename == 0x20 || *filename == 0x09))
+  if ((current_partition == 0xFFFFFF || (to >= 0x80 && to <= 0xFF)) && filename && (*filename == 0x20 || *filename == 0x09))
     {
       if (to == 0xffff /* || to == ram_drive */)
       {
-	if (mem <= 0)
+	if (((long long)mem) <= 0)
 	{
 	  //grub_printf ("When mapping whole mem device at a fixed location, you must specify --mem to a value > 0.\n");
 	  return ! (errnum = ERR_MD_BASE);
 	}
-	start_sector = ((unsigned long)mem);
+	start_sector = (unsigned long long)mem;
 	sector_count = 1;
 	//goto map_whole_drive;
       }else if (to == ram_drive)
@@ -6549,17 +8437,17 @@ map_func (char *arg, int flags)
 		return ! (errnum = ERR_RD_BASE);
 	to = 0xffff;
 	mem = (rd_base >> SECTOR_BITS);
-	start_sector = ((unsigned long)mem);
+	start_sector = (unsigned long long)mem;
 	sector_count = 1;
 	//goto map_whole_drive;
       }else{
         /* when whole drive is mapped, the geometry should not be specified. */
-        if (heads_per_cylinder > 0 || sectors_per_track > 0)
+        if ((long long)heads_per_cylinder > 0 || (long long)sectors_per_track > 0)
 	  return ! (errnum = ERR_SPECIFY_GEOM);
         /* when whole drive is mapped, the mem option should not be specified. 
          * but when we delete a drive map slot, the mem option means force.
          */
-        if (mem != -1 && to != from)
+        if (mem != -1ULL && to != from)
 	  return ! (errnum = ERR_SPECIFY_MEM);
 
         sectors_per_track = 1;/* 1 means the specified geometry will be ignored. */
@@ -6575,13 +8463,13 @@ map_func (char *arg, int flags)
       }
     }
 
-  if (mem == -1)
+  if (mem == -1ULL)
   {
     query_block_entries = -1; /* query block list only */
     blocklist_func (to_drive, flags);
     if (errnum)
 	return 0;
-    if (query_block_entries != 1 && mem == -1)
+    if (query_block_entries != 1 && mem == -1ULL)
 	return ! (errnum = ERR_NON_CONTIGUOUS);
 
     start_sector = map_start_sector; /* in big 2048-byte sectors */
@@ -6595,7 +8483,7 @@ map_func (char *arg, int flags)
   if ((to == 0xffff /* || to == ram_drive */) && sector_count == 1)
   {
     /* fixed memory mapping */
-    grub_memmove ((char *) BS, (char *)(start_sector << 9), SECTOR_SIZE);
+    grub_memmove64 ((unsigned long long)(unsigned long) BS, (start_sector << 9), SECTOR_SIZE);
   }else{
     if (! grub_open (to_drive))
 	return 0;
@@ -6603,10 +8491,10 @@ map_func (char *arg, int flags)
     rawread_ignore_memmove_overflow = 1;
     disk_read_hook = disk_read_start_sector_func;
     /* Read the first sector of the emulated disk.  */
-    err = grub_read ((char *) BS, SECTOR_SIZE);
+    err = grub_read ((unsigned long long)(unsigned long) BS, SECTOR_SIZE, 0xedde0d90);
     disk_read_hook = 0;
     rawread_ignore_memmove_overflow = 0;
-    if (err != SECTOR_SIZE)
+    if (err != SECTOR_SIZE && from != ram_drive)
     {
       grub_close ();
       /* This happens, if the file size is less than 512 bytes. */
@@ -6615,16 +8503,17 @@ map_func (char *arg, int flags)
       return 0;
     }
 
+    to_filesize = gzip_filemax;
     sector_count = (filemax + 0x1ff) >> SECTOR_BITS; /* in small 512-byte sectors */
     if (start_sector == part_start /* && part_start */ && sector_count == 1)
     {
-      if (mem != -1)
+      if (mem != -1ULL)
       {
 	char buf[32];
 
 	grub_close ();
 	sector_count = part_length;
-        grub_sprintf (buf, "(%d)%d+%d", to, part_start, part_length);
+        grub_sprintf (buf, "(%d)%ld+%ld", to, (unsigned long long)part_start, (unsigned long long)part_length);
         if (! grub_open (buf))
 		return 0;
         filepos = SECTOR_SIZE;
@@ -6633,7 +8522,7 @@ map_func (char *arg, int flags)
       }
     }
 
-    if (mem == -1)
+    if (mem == -1ULL)
       grub_close ();
     if (to == 0xffff && sector_count == 1)
     {
@@ -6646,7 +8535,7 @@ map_func (char *arg, int flags)
   if (buf_geom.sector_size == 2048)
 	start_sector *= 4;
 
-  if (BS->boot_signature != 0xAA55)
+  if (filemax < 512 || BS->boot_signature != 0xAA55)
 	goto geometry_probe_failed;
   
   /* probe the BPB */
@@ -6655,33 +8544,33 @@ map_func (char *arg, int flags)
 	goto failed_probe_BPB;
   
   if (debug > 0 && ! disable_map_info)
-    grub_printf ("%s BPB found %s 0xEB (jmp) leading the boot sector.\n",
+    grub_printf ("%s BPB found %s 0xEB (jmp) leading the boot sector.\n", 
 		filesystem_type == 1 ? "FAT12" :
 		filesystem_type == 2 ? "FAT16" :
 		filesystem_type == 3 ? "FAT32" :
 		filesystem_type == 4 ? "NTFS"  :
 		/*filesystem_type == 5 ?*/ "EXT2 GRLDR",
-		BS->dummy1[0] == (char)0xEB ? "with" : "but WITHOUT");
+		(BS->dummy1[0] == (char)0xEB ? "with" : "but WITHOUT"));
   
   if (sector_count != 1)
     {
       if (debug > 0 && ! disable_map_info)
       {
 	if (probed_total_sectors > sector_count)
-	  grub_printf ("Warning: BPB total_sectors(%d) is greater than the number of sectors in the whole disk image (%d). The int13 handler will disable any read/write operations across the image boundary. That means you will not be able to read/write sectors (in absolute address, i.e., lba) %d - %d, though they are logically inside your file system.\n", probed_total_sectors, sector_count, sector_count, probed_total_sectors - 1);
+	  grub_printf ("Warning: BPB total_sectors(%ld) is greater than the number of sectors in the whole disk image (%ld). The int13 handler will disable any read/write operations across the image boundary. That means you will not be able to read/write sectors (in absolute address, i.e., lba) %ld - %ld, though they are logically inside your file system.\n", (unsigned long long)probed_total_sectors, (unsigned long long)sector_count, (unsigned long long)sector_count, (unsigned long long)(probed_total_sectors - 1));
 	else if (probed_total_sectors < sector_count && ! disable_map_info)
-	  grub_printf ("info: BPB total_sectors(%d) is less than the number of sectors in the whole disk image(%d).\n", probed_total_sectors, sector_count);
+	  grub_printf ("info: BPB total_sectors(%ld) is less than the number of sectors in the whole disk image(%ld).\n", (unsigned long long)probed_total_sectors, (unsigned long long)sector_count);
       }
     }
 
-  if (mem == -1 && (from & 0x80) && (to & 0x80) && (start_sector == part_start && part_start && sector_count == part_length)/* && BS->hidden_sectors >= probed_sectors_per_track */)
+  if (mem == -1ULL && (from & 0x80) && (to & 0x80) && (start_sector == part_start && part_start && sector_count == part_length)/* && BS->hidden_sectors >= probed_sectors_per_track */)
   {
 	if (BS->hidden_sectors <= probed_sectors_per_track)
-		BS->hidden_sectors = part_start;
+		BS->hidden_sectors = (unsigned long)part_start;
 	extended_part_start = BS->hidden_sectors - probed_sectors_per_track;
 	extended_part_length = probed_total_sectors + probed_sectors_per_track;
 	if (debug > 0 && ! disable_map_info)
-	  grub_printf ("\nBPB probed C/H/S = %d/%d/%d, BPB probed total sectors = %d\n", probed_cylinders, probed_heads, probed_sectors_per_track, probed_total_sectors);
+	  grub_printf ("\nBPB probed C/H/S = %d/%d/%d, BPB probed total sectors = %ld\n", probed_cylinders, probed_heads, probed_sectors_per_track, (unsigned long long)probed_total_sectors);
 	BPB_H = probed_heads;
 	BPB_S = probed_sectors_per_track;
 	if (in_situ)
@@ -6694,13 +8583,13 @@ map_func (char *arg, int flags)
 	if (debug > 0 && ! disable_map_info)
 	  grub_printf ("Try to locate extended partition (hd%d)%d+%d for the virtual (hd%d).\n", (to & 0x7f), extended_part_start, extended_part_length, (from & 0x7f));
 	grub_sprintf ((char *)BS, "(hd%d)%d+%d", (to & 0x7f), extended_part_start, extended_part_length);
-//grub_printf ("part_start=%x, part_length=%x, extended_part_start=%x, extended_part_length=%x\n", part_start, part_length, extended_part_start, extended_part_length);
+	//j = filesystem_type;	/* save filesystem_type */
 	if (! grub_open ((char *)BS))
 		return 0;
 
-//grub_printf ("part_start=%x, part_length=%x, extended_part_start=%x, extended_part_length=%x\n", part_start, part_length, extended_part_start, extended_part_length);
+	//filesystem_type = j;	/* restore filesystem_type */
 	/* Read the first sector of the emulated disk.  */
-	if (grub_read ((char *) BS, SECTOR_SIZE) != SECTOR_SIZE)
+	if (grub_read ((unsigned long long)(unsigned int) BS, SECTOR_SIZE, 0xedde0d90) != SECTOR_SIZE)
 	{
 		grub_close ();
 
@@ -6710,7 +8599,6 @@ map_func (char *arg, int flags)
  
 		return 0;
 	}
-//grub_printf ("part_start=%x, part_length=%x, extended_part_start=%x, extended_part_length=%x\n", part_start, part_length, extended_part_start, extended_part_length);
 	grub_close ();
 	for (i = 0; i < 4; i++)
 	{
@@ -6718,7 +8606,8 @@ map_func (char *arg, int flags)
 		if (sys == 0x05 || sys == 0x0f || sys == 0)
 		{
 			*(long long *)&(BS->P[i].boot_indicator) = 0LL;
-			*(long long *)(void *)&(BS->P[i].start_lba) = 0LL;
+			//*(long long *)&(BS->P[i].start_lba) = 0LL;
+			((long long *)&(BS->P[i]))[1] = 0LL;
 		}
 	}
 	part_start = extended_part_start;
@@ -6727,7 +8616,7 @@ map_func (char *arg, int flags)
 	sector_count = extended_part_length;
 	
 	/* when emulating a hard disk using a logical partition, the geometry should not be specified. */
-	if (heads_per_cylinder > 0 || sectors_per_track > 0)
+	if ((long long)heads_per_cylinder > 0 || (long long)sectors_per_track > 0)
 	  return ! (errnum = ERR_SPECIFY_GEOM);
 
 	goto failed_probe_BPB;
@@ -6738,17 +8627,19 @@ map_func (char *arg, int flags)
 failed_probe_BPB:
   /* probe the partition table */
   
-  if (probe_mbr (BS, start_sector, sector_count, part_start))
+  if (probe_mbr (BS, start_sector, sector_count, (unsigned long)part_start))
 	goto geometry_probe_failed;
 
   if (sector_count != 1)
     {
+      if (probed_total_sectors < probed_total_sectors_round && probed_total_sectors_round <= sector_count)
+	  probed_total_sectors = probed_total_sectors_round;
       if (debug > 0 && ! disable_map_info)
       {
 	if (probed_total_sectors > sector_count)
-	  grub_printf ("Warning: total_sectors calculated from partition table(%d) is greater than the number of sectors in the whole disk image (%d). The int13 handler will disable any read/write operations across the image boundary. That means you will not be able to read/write sectors (in absolute address, i.e., lba) %d - %d, though they are logically inside your emulated virtual disk(according to the partition table).\n", probed_total_sectors, sector_count, sector_count, probed_total_sectors - 1);
+	  grub_printf ("Warning: total_sectors calculated from partition table(%ld) is greater than the number of sectors in the whole disk image (%ld). The int13 handler will disable any read/write operations across the image boundary. That means you will not be able to read/write sectors (in absolute address, i.e., lba) %ld - %ld, though they are logically inside your emulated virtual disk(according to the partition table).\n", (unsigned long long)probed_total_sectors, (unsigned long long)sector_count, (unsigned long long)sector_count, (unsigned long long)(probed_total_sectors - 1));
 	else if (probed_total_sectors < sector_count)
-	  grub_printf ("info: total_sectors calculated from partition table(%d) is less than the number of sectors in the whole disk image(%d).\n", probed_total_sectors, sector_count);
+	  grub_printf ("info: total_sectors calculated from partition table(%ld) is less than the number of sectors in the whole disk image(%ld).\n", (unsigned long long)probed_total_sectors, (unsigned long long)sector_count);
       }
     }
   
@@ -6758,25 +8649,25 @@ geometry_probe_failed:
 
   if (BPB_H || BPB_S)
   {
-	if (mem != -1)
+	if (mem != -1ULL)
 		grub_close ();
 	return ! (errnum = ERR_EXTENDED_PARTITION);
   }
 
   /* possible ISO9660 image */
-  if (BS->boot_signature != 0xAA55)
+  if (filemax < 512 || BS->boot_signature != 0xAA55 || (unsigned char)from >= (unsigned char)0xA0)
   {
-	if (heads_per_cylinder < 0)
+	if ((long long)heads_per_cylinder < 0)
 		heads_per_cylinder = 0;
-	if (sectors_per_track < 0)
+	if ((long long)sectors_per_track < 0)
 		sectors_per_track = 0;
   }
 
-  if (heads_per_cylinder < 0)
+  if ((long long)heads_per_cylinder < 0)
     {
 	if (from & 0x80)
 	{
-		if (mem != -1)
+		if (mem != -1ULL)
 			grub_close ();
 		return ! (errnum = ERR_NO_HEADS);
 	}
@@ -6797,7 +8688,7 @@ geometry_probe_failed:
 			  }
 			else
 			  {
-				if (mem != -1)
+				if (mem != -1ULL)
 					grub_close ();
 				return ! (errnum = ERR_NO_HEADS);
 			  }
@@ -6840,11 +8731,11 @@ geometry_probe_failed:
 	  grub_printf ("\nAutodetect number-of-heads failed. Use the specified %d\n", heads_per_cylinder);
     }
 
-  if (sectors_per_track < 0)
+  if ((long long)sectors_per_track < 0)
     {
 	if (from & 0x80)
 	{
-		if (mem != -1)
+		if (mem != -1ULL)
 			grub_close ();
 		return ! (errnum = ERR_NO_SECTORS);
 	}
@@ -6872,7 +8763,7 @@ geometry_probe_failed:
 			  }
 			else
 			  {
-				if (mem != -1)
+				if (mem != -1ULL)
 					grub_close ();
 				return ! (errnum = ERR_NO_SECTORS);
 			  }
@@ -6994,22 +8885,22 @@ geometry_probe_ok:
   if (! disable_map_info)
   {
     if (debug > 0)
-      grub_printf ("\nprobed C/H/S = %d/%d/%d, probed total sectors = %d\n", probed_cylinders, probed_heads, probed_sectors_per_track, probed_total_sectors);
-    if (mem != -1 && mem <= 0)
+      grub_printf ("\nprobed C/H/S = %d/%d/%d, probed total sectors = %ld\n", probed_cylinders, probed_heads, probed_sectors_per_track, (unsigned long long)probed_total_sectors);
+    if (mem != -1ULL && ((long long)mem) <= 0)
     {
-      if (((unsigned long)(-mem)) < probed_total_sectors && probed_total_sectors > 1)
-	mem = - probed_total_sectors;
+      if (((unsigned long long)(-mem)) < probed_total_sectors && probed_total_sectors > 1 && filemax >= 512)
+	mem = - (unsigned long long)probed_total_sectors;
     }
   }
   if (BPB_H || BPB_S)
 	if (BPB_H != probed_heads || BPB_S != probed_sectors_per_track)
 	{
-		if (mem != -1)
+		if (mem != -1ULL)
 			grub_close ();
 		return ! (errnum = ERR_EXTENDED_PARTITION);
 	}
   
-  if (heads_per_cylinder <= 0)
+  if ((long long)heads_per_cylinder <= 0)
 	heads_per_cylinder = probed_heads;
   else if (heads_per_cylinder != probed_heads)
     {
@@ -7017,7 +8908,7 @@ geometry_probe_ok:
 	  grub_printf ("\nWarning!! Probed number-of-heads(%d) is not the same as you specified.\nThe specified value %d takes effect.\n", probed_heads, heads_per_cylinder);
     }
 
-  if (sectors_per_track <= 0)
+  if ((long long)sectors_per_track <= 0)
 	sectors_per_track = probed_sectors_per_track;
   else if (sectors_per_track != probed_sectors_per_track)
     {
@@ -7042,7 +8933,7 @@ map_whole_drive:
 
     if (i == DRIVE_MAP_SIZE)
     {
-      if (mem != -1)
+      if (mem != -1ULL)
         grub_close ();
       errnum = ERR_WONT_FIT;
       return 0;
@@ -7052,7 +8943,7 @@ map_whole_drive:
     if (to == from && read_Only == 0 && fake_write == 0 && disable_lba_mode == 0
       && disable_chs_mode == 0 && start_sector == 0 && (sector_count == 0 ||
 	/* sector_count == 1 if the user uses a special method to map a whole drive, e.g., map (hd1)+1 (hd0) */
-     (sector_count == 1 && heads_per_cylinder <= 0 && sectors_per_track <= 1)))
+     (sector_count == 1 && (long long)heads_per_cylinder <= 0 && (long long)sectors_per_track <= 1)))
 	goto delete_drive_map_slot;
   }
 
@@ -7095,7 +8986,7 @@ map_whole_drive:
 	  to = hooked_drive_map[j].to_drive;
 	  if (to == 0xFF && !(hooked_drive_map[j].to_cylinder & 0x4000))
 		to = 0xFFFF;		/* memory device */
-	  if (start_sector == 0 && (sector_count == 0 || (sector_count == 1 && heads_per_cylinder <= 0 && sectors_per_track <= 1)))
+	  if (start_sector == 0 && (sector_count == 0 || (sector_count == 1 && (long long)heads_per_cylinder <= 0 && (long long)sectors_per_track <= 1)))
 	  {
 		sector_count = hooked_drive_map[j].sector_count;
 		heads_per_cylinder = hooked_drive_map[j].max_head + 1;
@@ -7107,7 +8998,7 @@ map_whole_drive:
 	  if (to == from && read_Only == 0 && fake_write == 0 && disable_lba_mode == 0
 	      && disable_chs_mode == 0 && start_sector == 0 && (sector_count == 0 ||
 	  /* sector_count == 1 if the user uses a special method to map a whole drive, e.g., map (hd1)+1 (hd0) */
-	     (sector_count == 1 && heads_per_cylinder <= 0 && sectors_per_track <= 1)))
+	     (sector_count == 1 && (long long)heads_per_cylinder <= 0 && (long long)sectors_per_track <= 1)))
 	    {
 		/* yes, delete the FROM drive(with slot[i]), not the TO drive(with slot[j]) */
 		if (from != ram_drive)
@@ -7118,11 +9009,13 @@ map_whole_drive:
     }
 
   j = i;	/* save i into j */
+//grub_printf ("\n debug 4 start_sector=%lX, part_start=%lX, part_length=%lX, sector_count=%lX, filemax=%lX\n", start_sector, part_start, part_length, sector_count, filemax);
   
 #ifndef GRUB_UTIL
   /* how much memory should we use for the drive emulation? */
-  if (mem != -1)
+  if (mem != -1ULL)
     {
+      unsigned long long start_byte;
       unsigned long long bytes_needed;
       unsigned long long base;
       unsigned long long top_end;
@@ -7135,15 +9028,24 @@ map_whole_drive:
       if (start_sector == part_start && part_start == 0 && sector_count == 1)
 		sector_count = part_length;
 
-      //bytes_needed = ((filemax + 0x3ff) & (-SECTOR_SIZE*2));
-      //bytes_needed = ((sector_count + 1) & ~1)<< SECTOR_BITS;
-      bytes_needed = sector_count << SECTOR_BITS;
-      //bytes_needed = sector_count << SECTOR_BITS;
-      if (mem <= 0)
-	base = ((unsigned long long)(-mem)) << 9;
-      if (bytes_needed < base)
-	bytes_needed = base;
-      
+      /* For GZIP disk image if uncompressed size >= 4GB, 
+         high bits of filemax is wrong, sector_count is also wrong. */
+      #if 0
+      if ( compressed_file && (sector_count < probed_total_sectors) && filesystem_type > 0 )
+      {   /* adjust high bits of filemax and sector_count */
+	  unsigned long sizehi = (unsigned long)(probed_total_sectors >> (32-SECTOR_BITS));
+	  if ( (unsigned long)filemax < (unsigned long)(probed_total_sectors << SECTOR_BITS) )
+	      ++sizehi;
+	  fsmax = filemax += (unsigned long long)sizehi << 32;
+	  sector_count = filemax >> SECTOR_BITS;
+	  grub_printf("Uncompressed size is probably %ld sectors\n",sector_count);
+      }
+		#endif
+      if ( (long long)mem < 0LL && sector_count < (-mem) )
+	bytes_needed = (-mem) << SECTOR_BITS;
+      else
+	bytes_needed = sector_count << SECTOR_BITS;
+
       /* filesystem_type
        *	 0		an MBR device
        *	 1		FAT12
@@ -7155,19 +9057,22 @@ map_whole_drive:
        * Note: An MBR device is a whole disk image that has a partition table.
        */
 
-      if (filesystem_type && (from & 0x80) && (from < 0xA0))	/* no partition table */
+      if (add_mbt<0)
+	  add_mbt = (filesystem_type > 0 && (from & 0x80) && (from < 0xA0))? 1: 0; /* known filesystem without partition table */
+
+      if (add_mbt)
 	bytes_needed += sectors_per_track << SECTOR_BITS;	/* build the Master Boot Track */
 
-      bytes_needed = (bytes_needed + 0x3ff) & 0xfffffc00;	/* KB alignment */
+      bytes_needed = ((bytes_needed+4095)&(-4096ULL));	/* 4KB alignment */
 //}
       if ((to == 0xffff || to == ram_drive) && sector_count == 1)
 	/* mem > 0 */
 	bytes_needed = 0;
-      base = 0;
+      //base = 0;
 
-      start_sector <<= SECTOR_BITS;
+      start_byte = start_sector << SECTOR_BITS;
       if (to == ram_drive)
-	start_sector += rd_base;
+	start_byte += rd_base;
   /* we can list the total memory thru int15/E820. on the other hand, we can
    * see thru our drive map slots how much memory have already been used for
    * drive emulation. */
@@ -7182,6 +9087,11 @@ map_whole_drive:
       /* once int13 hooked and at least 1 slot uses mem==1, also hook int15
        */
 
+      if (map_mem_max > 0x100000000ULL && ! is64bit)
+	  map_mem_max = 0x100000000ULL;
+      if (map_mem_min < 0x100000ULL)
+	  map_mem_min = 0x100000ULL;
+
       if (mbi.flags & MB_INFO_MEM_MAP)
         {
           struct AddrRangeDesc *map = (struct AddrRangeDesc *) saved_mmap_addr;
@@ -7189,36 +9099,29 @@ map_whole_drive:
 
           for (; end_addr > (unsigned long) map; map = (struct AddrRangeDesc *) (((int) map) + 4 + map->size))
 	    {
-
+	      unsigned long long tmpbase, tmpend, tmpmin;
 	      if (map->Type != MB_ARD_MEMORY)
 		  continue;
-	      //bottom_end = map->BaseAddr;
-	      top_end = map->BaseAddr + map->Length;
-	      if (top_end > 0x100000000ULL)
-		  top_end = 0x100000000ULL;
-  /* Search for mem map slots in BIOS_DRIVE_MAP.  */
+	      tmpmin = (map->BaseAddr > map_mem_min) ?
+			map->BaseAddr : map_mem_min;
+	      tmpmin = ((tmpmin+4095)&(-4096ULL));/* 4KB alignment, round up */
+	      tmpend = (map->BaseAddr + map->Length < map_mem_max) ?
+			map->BaseAddr + map->Length : map_mem_max;
+	      tmpend &= (-4096ULL);	/* 4KB alignment, round down */
+	      if (tmpend < bytes_needed)
+		  continue;
+	      tmpbase = tmpend - bytes_needed; // maximum possible base for this region
+	      //grub_printf("range b %lx l %lx -- tm %lx te %lx tb %lx\n",map->BaseAddr,map->Length,tmpmin,tmpend,tmpbase);
+	      if (((long long)mem) > 0)//force the base value
+	      {
+		  if (tmpbase >= (mem << 9))
+		      tmpbase =  (mem << 9); // move tmpbase down to forced value
+		  else // mem base exceed maximum possible base for this region
+		      continue;
+	      }
+	      if (tmpbase < tmpmin) // base fall below minimum address for this region
+		  continue;
 
-/* 0x4000000ULL is 64 MB , 0x100000ULL is 1 MB */
-#define MIN_EMU_BASE 0x100000ULL
-//	      if (to == 0xff)	/* mem > 0 */
-//		if (top_end >= ((unsigned long long)mem << 10))
-//		      bytes_needed = top_end - ((unsigned long long)mem << 10);
-//		else
-//		      continue;
-//	      else
-		if (mem > 0)//force the base value
-		{
-		      if (((unsigned long long)mem << 9) < map->BaseAddr)
-			      continue;
-		      if (((unsigned long long)mem << 9) >= top_end)
-			      continue;
-		      if (top_end - ((unsigned long long)mem << 9) < bytes_needed)
-			      continue;
-		      //bytes_needed = top_end - ((unsigned long long)mem << 10);
-		      //break;
-		}
-
-	      if (map->Length >= bytes_needed && (base = (top_end - bytes_needed) & 0xFFFFF000) >= MIN_EMU_BASE)
 	      for (i = 0; i < DRIVE_MAP_SIZE; i++)
 	        {
       
@@ -7228,42 +9131,69 @@ map_whole_drive:
 		  /* TO_DRIVE == 0xFF indicates a MEM map */
 		  if (bios_drive_map[i].to_drive == 0xFF && !(bios_drive_map[i].to_cylinder & 0x4000))
 	            {
-		      unsigned long long x, tmpbase;
-		      x = bios_drive_map[i].start_sector;
-		      x <<= SECTOR_BITS;
-		      if (x >= map->BaseAddr && x < top_end)
-			{
-			  if (x - map->BaseAddr >= bytes_needed && (tmpbase = (x - bytes_needed) & 0xFFFFF000) >= MIN_EMU_BASE)
-			    {
-			      if (base > tmpbase)
-				  base = tmpbase;
-			    }
-			  else
-			    {
-				/* not enough room for this memory area */
-				base = 0;
-				break;
-			    }
+		      unsigned long long drvbase, drvend;
+		      drvbase = (bios_drive_map[i].start_sector << SECTOR_BITS);
+		      drvend  = (bios_drive_map[i].sector_count << SECTOR_BITS) + drvbase;
+		      drvend  = ((drvend+4095)&(-4096ULL));/* 4KB alignment, round up */
+		      drvbase &= (-4096ULL);	/* 4KB alignment, round down */
+		      //grub_printf("drv %02x: db %lx de %lx -- tb %lx te %lx\n",bios_drive_map[i].from_drive,drvbase,drvend,tmpbase,tmpend);
+		      if (tmpbase < drvend && drvbase < tmpend)
+			{ // overlapped address, move tmpend and tmpbase down
+			  tmpend = drvbase;
+			  if (tmpend >= bytes_needed)
+			  {
+			      if ((long long)mem <= 0)
+			      { // decrease tmpbase
+				  tmpbase = tmpend - bytes_needed;
+				  if (tmpbase >= tmpmin)
+				  { // recheck new tmpbase 
+				      i = -1; continue;
+				  }
+			      }
+			      else 
+			      { // force base value, cannot decrease tmpbase
+				  /* changed "<" to "<=". -- tinybit */
+				  if (tmpbase <= tmpend - bytes_needed)
+				  { // there is still enough space below drvbase
+				      continue;
+				  }
+			      }
+			  }
+			  /* not enough room for this memory area */
+			//  grub_printf("region can't be used bn %lx te %lx  tb %lx\n",bytes_needed,tmpend,tmpbase);
+			  tmpbase = 0; break;
 			}
 		    }
 	        } /* for (i = 0; i < DRIVE_MAP_SIZE; i++) */
 
-	      if (base >= MIN_EMU_BASE)
+	      if (tmpbase >= tmpmin)
 	      {
 		/* check if the memory area overlaps the (md)... or (rd)... file. */
-		if (to != 0xffff && to != ram_drive)	/* TO is not in memory */
-		    break;	/* success */
-		if (mem > 0)	/* TO is in memory but is mapped at a fixed location */
-		    break;	/* success */
-		if (!compressed_file) /* TO is in memory and is normally mapped and uncompressed */
-		    break;	/* success */
+		if ( (to != 0xffff && to != ram_drive)	/* TO is not in memory */
+		  || ((long long)mem) > 0	/* TO is in memory but is mapped at a fixed location */
+		  || !compressed_file		/* TO is in memory and is normally mapped and uncompressed */
 		/* Now TO is in memory and is normally mapped and compressed */
-		if (base + bytes_needed <= start_sector) /* XXX: destination is below the gzip image */
-		    break;	/* success */
-		if (base >= start_sector + bytes_needed) /* XXX: destination is above the gzip image */
-		    break;	/* success */
-		/* destination overlaps the gzip image */
-		base = 0;	/* fail and try next memory block. */
+		  || tmpbase + bytes_needed <= start_byte  /* XXX: destination is below the gzip image */
+		  || tmpbase >= start_byte + to_filesize) /* XXX: destination is above the gzip image */
+		{
+		    if (prefer_top)
+		    {
+			if (base < tmpbase)
+			{
+			    base = tmpbase; top_end = tmpend;
+			}
+			continue; // find available region with highest address
+		    }
+		    else
+		    {
+			base = tmpbase; top_end = tmpend;
+			break; // use the first available region
+		    }
+		}
+		else
+		    /* destination overlaps the gzip image */
+		    /* fail and try next memory block. */
+		    continue;
 	      }
 	      //if (to == 0xff)
 		//bytes_needed = 0;
@@ -7274,13 +9204,13 @@ map_whole_drive:
       else
 	  grub_printf ("\nFatal: Your BIOS has no support for System Memory Map(INT15/EAX=E820h).\nAs a result you cannot use the --mem option.\n");
 
-      if (base < MIN_EMU_BASE)
+      if (base < map_mem_min)
       {
 	  grub_close ();
 	  return ! (errnum = ERR_WONT_FIT);
       }
 
-      if (mem > 0)
+      if (((long long)mem) > 0)
       {
 	  base = ((unsigned long long)mem << 9);
 	  sector_count = (top_end - base) >> SECTOR_BITS;
@@ -7290,64 +9220,101 @@ map_whole_drive:
       }
 
       bytes_needed = base;
-      if (filesystem_type && (from & 0x80) && (from < 0xA0))	/* no partition table */
+      if (add_mbt)	/* no partition table */
 	bytes_needed += sectors_per_track << SECTOR_BITS;	/* build the Master Boot Track */
 
       /* bytes_needed points to the first partition, base points to MBR */
       
-#undef MIN_EMU_BASE
+//#undef MIN_EMU_BASE
       //      if (! grub_open (filename1))
       //	return 0;
 	
       /* the first sector already read at BS */
-      if ((to != 0xffff && to != ram_drive) || mem <= 0)
+      #if 0
+      if ((to != 0xffff && to != ram_drive) || ((long long)mem) <= 0)
 	{
+		#endif
 	  /* if image is in memory and not compressed, we can simply move it. */
 	  if ((to == 0xffff || to == ram_drive) && !compressed_file)
 	  {
-	    if ((int)bytes_needed != start_sector)
-		grub_memmove ((char *)(int)bytes_needed, (char *)start_sector, filemax);
+	    if (bytes_needed != start_byte)
+		grub_memmove64 (bytes_needed, start_byte, filemax);
 	  } else {
-#if 1
-	    grub_memmove ((char *)(int)bytes_needed, (char *)BS, SECTOR_SIZE);
+	    unsigned long long read_result;
+	    grub_memmove64 (bytes_needed, (unsigned long long)(unsigned int)BS, SECTOR_SIZE);
 	    /* read the rest of the sectors */
-	    if (grub_read ((char *)((int)bytes_needed + SECTOR_SIZE), -1) != filemax - SECTOR_SIZE)
-#else
-	    filepos = 0;
-	    if (grub_read ((char *)((int)bytes_needed), -1) != filemax)
-#endif
+	    if (filemax > SECTOR_SIZE)
 	    {
-		grub_close ();
-		if (errnum == ERR_NONE)
+	      read_result = grub_read ((bytes_needed + SECTOR_SIZE), -1ULL, 0xedde0d90);
+	      if (read_result != filemax - SECTOR_SIZE)
+	      {
+		//if ( !probed_total_sectors || read_result<(probed_total_sectors<<SECTOR_BITS) )
+		//{
+		unsigned long long required = (probed_total_sectors << SECTOR_BITS) - SECTOR_SIZE;
+		/* read again only required sectors */
+		if ( ! probed_total_sectors 
+		     || required >= filemax - SECTOR_SIZE
+		     || ( (filepos = SECTOR_SIZE), /* re-read from the second sector. */
+			  grub_read (bytes_needed + SECTOR_SIZE, required, 0xedde0d90) != required
+			)
+		   )
+		{
+		    grub_close ();
+		    if (errnum == ERR_NONE)
 			errnum = ERR_READ;
-		return 0;
+		    return 0;
+		}
+		//}
+	      }
 	    }
 	  }
-//grub_printf ("debug info4: filemax=%d, BS=%s, to_drive=%s\n", filemax, BS, to_drive);
 	  grub_close ();
+	 #if 0
 	}
-
+      else if (/*(to == 0xffff || to == ram_drive) && */!compressed_file)
+	{
+	    if (bytes_needed != start_byte)
+		grub_memmove64 (bytes_needed, start_byte, filemax);
+		grub_close ();
+	}
+	else
+     {
+		grub_memmove64 (bytes_needed, (unsigned long long)(unsigned int)BS, SECTOR_SIZE);
+        grub_read (bytes_needed + SECTOR_SIZE, -1ULL, 0xedde0d90);
+        grub_close ();
+      }
+	#endif
       start_sector = base >> SECTOR_BITS;
       to = 0xFFFF/*GRUB_INVALID_DRIVE*/;
-      if (filesystem_type && (from & 0x80) && (from < 0xA0))	/* no partition table */
+
+      if (add_mbt)	/* no partition table */
       {
 	unsigned long sectors_per_cylinder1, cylinder, sector_rem;
 	unsigned long head, sector;
+
+	/* First sector of disk image has already been read to buffer BS/mbr */
 	
 	/* modify the BPB drive number. required for FAT12/16/32/NTFS */
 	if (filesystem_type != -1)
-	if (!*(char *)((int)bytes_needed + ((filesystem_type == 3) ? 0x41 : 0x25)))
-		*(char *)((int)bytes_needed + ((filesystem_type == 3) ? 0x40 : 0x24)) = from;
+	if (!*(char *)((int)BS + ((filesystem_type == 3) ? 0x41 : 0x25)))
+		*(char *)((int)BS + ((filesystem_type == 3) ? 0x40 : 0x24)) = from;
 	
 	/* modify the BPB hidden sectors. required for FAT12/16/32/NTFS/EXT2 */
-	if (filesystem_type != -1 || *(unsigned long *)((int)bytes_needed + 0x1c) == part_start)
-	    *(unsigned long *)((int)bytes_needed + 0x1c) = sectors_per_track;
+	if (filesystem_type != -1 || *(unsigned long *)((int)BS + 0x1c) == (unsigned long)part_start)
+	    *(unsigned long *)((int)BS + 0x1c) = sectors_per_track;
+	
+	grub_memmove64 (bytes_needed, (unsigned long long)(unsigned int)BS, SECTOR_SIZE);
+	
+	/* clear BS/mbr buffer */
+	grub_memset(mbr, 0, SECTOR_SIZE);
 	
 	/* clear MS magic number */
-	*(long *)((int)base + 0x1b8) = 0; 
+	//*(long *)((int)mbr + 0x1b8) = 0; 
+	/* Let MS magic number = virtual BIOS drive number */
+	*(long *)((int)mbr + 0x1b8) = (unsigned char)from; 
 	/* build the partition table */
-	*(long *)((int)base + 0x1be) = 0x00010180L; 
-	*(char *)((int)base + 0x1c2) = //((filesystem_type == -1 || filesystem_type == 5)? 0x83 : filesystem_type == 4 ? 0x07 : 0x0c); 
+	*(long *)((int)mbr + 0x1be) = 0x00010180L; 
+	*(char *)((int)mbr + 0x1c2) = //((filesystem_type == -1 || filesystem_type == 5)? 0x83 : filesystem_type == 4 ? 0x07 : 0x0c); 
 		filesystem_type == 1 ? 0x0E /* FAT12 */ :
 		filesystem_type == 2 ? 0x0E /* FAT16 */ :
 		filesystem_type == 3 ? 0x0C /* FAT32 */ :
@@ -7358,58 +9325,68 @@ map_whole_drive:
 
 	/* calculate the last sector's C/H/S value */
 	sectors_per_cylinder1 = sectors_per_track * heads_per_cylinder;
-	cylinder = (sector_count - 1) / sectors_per_cylinder1;
-	sector_rem = (sector_count - 1) % sectors_per_cylinder1;
-	head = sector_rem / sectors_per_track;
-	sector = sector_rem % sectors_per_track;
+	cylinder = ((unsigned long)(sector_count - 1)) / sectors_per_cylinder1;	/* XXX: 64-bit div */
+	sector_rem = ((unsigned long)(sector_count - 1)) % sectors_per_cylinder1; /* XXX: 64-bit mod */
+	head = sector_rem / (unsigned long)sectors_per_track;
+	sector = sector_rem % (unsigned long)sectors_per_track;
 	sector++;
-	*(char *)((int)base + 0x1c3) = head;
-	*(unsigned short *)((int)base + 0x1c4) = sector | (cylinder << 8) | ((cylinder >> 8) << 6);
-	*(unsigned long *)((int)base + 0x1c6) = sectors_per_track; /* start LBA */
-	*(unsigned long *)((int)base + 0x1ca) = sector_count - sectors_per_track; /* sector count */
-	*(long long *)((int)base + 0x1ce) = 0LL; 
-	*(long long *)((int)base + 0x1d6) = 0LL; 
-	*(long long *)((int)base + 0x1de) = 0LL; 
-	*(long long *)((int)base + 0x1e6) = 0LL; 
-	*(long long *)((int)base + 0x1ee) = 0LL; 
-	*(long long *)((int)base + 0x1f6) = 0LL; 
-	*(unsigned short *)((int)base + 0x1fe) = 0xAA55;
+	*(char *)((int)mbr + 0x1c3) = head;
+	*(unsigned short *)((int)mbr + 0x1c4) = sector | (cylinder << 8) | ((cylinder >> 8) << 6);
+	*(unsigned long *)((int)mbr + 0x1c6) = sectors_per_track; /* start LBA */
+	*(unsigned long *)((int)mbr + 0x1ca) = sector_count - sectors_per_track; /* sector count */
+	*(long long *)((int)mbr + 0x1ce) = 0LL; 
+	*(long long *)((int)mbr + 0x1d6) = 0LL; 
+	*(long long *)((int)mbr + 0x1de) = 0LL; 
+	*(long long *)((int)mbr + 0x1e6) = 0LL; 
+	*(long long *)((int)mbr + 0x1ee) = 0LL; 
+	*(long long *)((int)mbr + 0x1f6) = 0LL; 
+	*(unsigned short *)((int)mbr + 0x1fe) = 0xAA55;
 	
 	/* compose a master boot record routine */
-	*(char *)((int)base) = 0xFA;	/* cli */
-	*(unsigned short *)((int)base + 0x01) = 0xC033; /* xor AX,AX */
-	*(unsigned short *)((int)base + 0x03) = 0xD08E; /* mov SS,AX */
-	*(long *)((int)base + 0x05) = 0xFB7C00BC; /* mov SP,7C00 ; sti */
-	*(long *)((int)base + 0x09) = 0x07501F50; /* push AX; pop DS */
+	*(char *)((int)mbr) = 0xFA;	/* cli */
+	*(unsigned short *)((int)mbr + 0x01) = 0xC033; /* xor AX,AX */
+	*(unsigned short *)((int)mbr + 0x03) = 0xD08E; /* mov SS,AX */
+	*(long *)((int)mbr + 0x05) = 0xFB7C00BC; /* mov SP,7C00 ; sti */
+	*(long *)((int)mbr + 0x09) = 0x07501F50; /* push AX; pop DS */
 						  /* push AX; pop ES */
-	*(long *)((int)base + 0x0d) = 0x7C1CBEFC; /* cld; mov SI,7C1C */
-	*(long *)((int)base + 0x11) = 0x50061CBF; /* mov DI,061C ; push AX */
-	*(long *)((int)base + 0x15) = 0x01E4B957; /* push DI ; mov CX, 01E4 */
-	*(long *)((int)base + 0x19) = 0x1ECBA4F3; /* repz movsb;retf;push DS */
-	*(long *)((int)base + 0x1d) = 0x537C00BB; /* mov BX,7C00 ; push BX */
-	*(long *)((int)base + 0x21) = 0x520180BA; /* mov DX,0180 ; push DX */
-	*(long *)((int)base + 0x25) = 0x530201B8; /* mov AX,0201 ; push BX */
-	*(long *)((int)base + 0x29) = 0x5F13CD41; /* inc CX; int 13; pop DI */
-	*(long *)((int)base + 0x2d) = 0x5607BEBE; /* mov SI,07BE ; push SI */
-	*(long *)((int)base + 0x31) = 0xCBFA5A5D; /* pop BP;pop DX;cli;retf */
+	*(long *)((int)mbr + 0x0d) = 0x7C1CBEFC; /* cld; mov SI,7C1C */
+	*(long *)((int)mbr + 0x11) = 0x50061CBF; /* mov DI,061C ; push AX */
+	*(long *)((int)mbr + 0x15) = 0x01E4B957; /* push DI ; mov CX, 01E4 */
+	*(long *)((int)mbr + 0x19) = 0x1ECBA4F3; /* repz movsb;retf;push DS */
+	*(long *)((int)mbr + 0x1d) = 0x537C00BB; /* mov BX,7C00 ; push BX */
+	*(long *)((int)mbr + 0x21) = 0x520180BA; /* mov DX,0180 ; push DX */
+	*(long *)((int)mbr + 0x25) = 0x530201B8; /* mov AX,0201 ; push BX */
+	*(long *)((int)mbr + 0x29) = 0x5F13CD41; /* inc CX; int 13; pop DI */
+	*(long *)((int)mbr + 0x2d) = 0x5607BEBE; /* mov SI,07BE ; push SI */
+	*(long *)((int)mbr + 0x31) = 0xCBFA5A5D; /* pop BP;pop DX;cli;retf */
+	grub_memmove64 (base, (unsigned long long)(unsigned int)mbr, SECTOR_SIZE);
       }
-      if ((from & 0x80) && (from < 0xA0))	/* the virtual drive is hard drive */
+      else if ((from & 0x80) && (from < 0xA0))	/* the virtual drive is hard drive */
       {
-	if (*(long *)((int)base + 0x1b8) == 0)
+	/* First sector of disk image has already been read to buffer BS/mbr */
+	if (*(long *)((int)mbr + 0x1b8) == 0)
 	  /* Let MS magic number = virtual BIOS drive number */
-	  *(long *)((int)base + 0x1b8) = (unsigned char)from; 
-	else if ((*(long *)((int)base + 0x1b8) & 0xFFFFFF00) == 0)
-	  *(long *)((int)base + 0x1b8) |= (from << 8); 
+	  *(long *)((int)mbr + 0x1b8) = (unsigned char)from; 
+	else if ((*(long *)((int)mbr + 0x1b8) & 0xFFFFFF00) == 0)
+	  *(long *)((int)mbr + 0x1b8) |= (from << 8); 
+	grub_memmove64 (base, (unsigned long long)(unsigned int)mbr, SECTOR_SIZE);
+      }
+
+      /* if FROM is (rd), no mapping is established. but the image will be
+       * loaded into memory, and (rd) will point to it. Note that Master
+       * Boot Track and MBR code have been built as above when needed
+       * for ram_drive > 0x80.
+       */
+      if (from == ram_drive)
+      {
+	rd_base = base;
+	rd_size = filemax;//(sector_count << SECTOR_BITS);
+	if (add_mbt)
+		rd_size += sectors_per_track << SECTOR_BITS;	/* build the Master Boot Track */
+	return 1;
       }
     }
 #endif	/* GRUB_UTIL */
-
-  if (from == ram_drive)
-  {
-	rd_base = (start_sector << SECTOR_BITS);
-	rd_size = (sector_count << SECTOR_BITS);
-	return 1;
-  }
 
   if (in_situ)
 	bios_drive_map[j].to_cylinder = 
@@ -7453,6 +9430,7 @@ map_whole_drive:
 		((tmp_geom.sector_size == 2048) << 14) |
 		((from >= 0xA0) << 13) |	/* assume cdrom if from_drive is 0xA0 or greater */
 		((!!(tmp_geom.flags & BIOSDISK_FLAG_BIFURCATE)) << 12) |
+		((filesystem_type > 0) << 11) |	/* has a known boot sector type */
 		((tmp_geom.cylinders - 1 > 0x3FF) ? 0x3FF : (tmp_geom.cylinders - 1));
   
   bios_drive_map[i].to_head = tmp_geom.heads - 1;
@@ -7462,10 +9440,11 @@ map_whole_drive:
 	bios_drive_map[i].to_sector |= 0x80;
   
   bios_drive_map[i].start_sector = start_sector;
-  bios_drive_map[i].start_sector_hi = 0;	/* currently only low 32 bits are used. */
+  //bios_drive_map[i].start_sector_hi = 0;	/* currently only low 32 bits are used. */
+  initrd_start_sector = start_sector;
 
   bios_drive_map[i].sector_count = sector_count;//(sector_count & 0xfffffffe) | fake_write | ! unsafe_boot;
-  bios_drive_map[i].sector_count_hi = 0;	/* currently only low 32 bits are used. */
+  //bios_drive_map[i].sector_count_hi = 0;	/* currently only low 32 bits are used. */
 
 #ifndef GRUB_UTIL
   /* increase the floppies or harddrives if needed */
@@ -7504,7 +9483,7 @@ delete_drive_map_slot:
 //    }
 
   grub_memmove ((char *) &bios_drive_map[i], (char *) &bios_drive_map[i + 1], sizeof (struct drive_map_slot) * (DRIVE_MAP_SIZE - i));
-  if (mem != -1)
+  if (mem != -1ULL)
 	  grub_close ();
 
 #undef	BS
@@ -7560,7 +9539,7 @@ static struct builtin builtin_map =
   "map",
   map_func,
   BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
-  "map [--status] [--mem[=RESERV]] [--hook] [--unhook] [--rehook]\n [--floppies=M] [--harddrives=N] [--memdisk-raw=RAW] [--a20-keep-on=AKO]\n [--safe-mbr-hook=SMH] [--int13-scheme=SCH] [--ram-drive=RD]\n [--rd-base=ADDR] [--rd-size=SIZE] [[--read-only] [--fake-write]\n [--unsafe-boot] [--disable-chs-mode] [--disable-lba-mode] [--heads=H]\n [--sectors-per-track=S] TO_DRIVE FROM_DRIVE]",
+  "map [--status] [--mem[=RESERV]] [--hook] [--unhook] [--unmap=DRIVES]\n [--rehook] [--floppies=M] [--harddrives=N] [--memdisk-raw=RAW]\n [--a20-keep-on=AKO] [--safe-mbr-hook=SMH] [--int13-scheme=SCH]\n [--ram-drive=RD] [--rd-base=ADDR] [--rd-size=SIZE] [[--read-only]\n [--fake-write] [--unsafe-boot] [--disable-chs-mode] [--disable-lba-mode]\n [--heads=H] [--sectors-per-track=S] TO_DRIVE FROM_DRIVE]",
   "Map the drive FROM_DRIVE to the drive TO_DRIVE. This is necessary"
   " when you chain-load some operating systems, such as DOS, if such an"
   " OS resides at a non-first drive. TO_DRIVE can be a disk file, this"
@@ -7598,7 +9577,7 @@ md5crypt_func (char *arg, int flags)
   char crypted[36];
   char key[32];
   unsigned int seed;
-  //int i;
+  int i;
   const char *const seedchars =
     "./0123456789ABCDEFGHIJKLMNOPQRST"
     "UVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -7633,11 +9612,12 @@ md5crypt_func (char *arg, int flags)
   
   /* Get a password.  */
   grub_memset (key, 0, sizeof (key));
-  prompt = "Password: ";
-  maxlen = sizeof (key) - 1;
-  echo_char = '*';
-  readline = 0;
-  get_cmdline (key);
+  get_cmdline_str.prompt = "Password: ";
+  get_cmdline_str.maxlen = sizeof (key) - 1;
+  get_cmdline_str.echo_char = '*';
+  get_cmdline_str.readline = 0;
+  get_cmdline_str.cmdline = key;
+  get_cmdline (get_cmdline_str);
 
   /* Crypt the key.  */
   make_md5_password (key, crypted);
@@ -7710,6 +9690,9 @@ static int
 modulenounzip_func (char *arg, int flags)
 {
   int ret;
+#ifndef NO_DECOMPRESSION
+  int no_decompression_bak = no_decompression;
+#endif
 
 #ifndef NO_DECOMPRESSION
   no_decompression = 1;
@@ -7718,7 +9701,7 @@ modulenounzip_func (char *arg, int flags)
   ret = module_func (arg, flags);
 
 #ifndef NO_DECOMPRESSION
-  no_decompression = 0;
+  no_decompression = no_decompression_bak;
 #endif
 
   return ret;
@@ -7751,7 +9734,7 @@ outline_func (char *arg, int flags)
   else if (grub_memcmp (arg, "status", 6) == 0)
   {
     if (debug > 0)
-      grub_printf (" Character outline is now %s\n", outline ? "on" : "off");
+      grub_printf (" Character outline is now %s\n", (outline ? "on" : "off"));
   }
   else
       errnum = ERR_BAD_ARGUMENT;
@@ -7785,7 +9768,7 @@ pager_func (char *arg, int flags)
   else if (grub_memcmp (arg, "status", 6) == 0)
   {
     if (debug > 0)
-      grub_printf (" Internal pager is now %s\n", use_pager ? "on" : "off");
+      grub_printf (" Internal pager is now %s\n", (use_pager ? "on" : "off"));
   }
   else
       errnum = ERR_BAD_ARGUMENT;
@@ -7804,8 +9787,7 @@ static struct builtin builtin_pager =
 
 
   /* Convert a LBA address to a CHS address in the INT 13 format.  */
-static void lba_to_chs (unsigned long lba, unsigned long *cl, unsigned long *ch, unsigned long *dh);
-static void
+void
 lba_to_chs (unsigned long lba, unsigned long *cl, unsigned long *ch, unsigned long *dh)
 {
       unsigned long cylinder, head, sector;
@@ -7829,13 +9811,13 @@ lba_to_chs (unsigned long lba, unsigned long *cl, unsigned long *ch, unsigned lo
 static int
 partnew_func (char *arg, int flags)
 {
-  unsigned long new_type, new_start, new_len;
+  unsigned long long new_type, new_start, new_len;
   unsigned long start_cl, start_ch, start_dh;
   unsigned long end_cl, end_ch, end_dh;
   unsigned long current_drive_bak;
   unsigned long current_partition_bak;
   char *filename;
-  unsigned long entry1;
+  unsigned long entry1, i;
   unsigned long active = -1;
 #if defined(STAGE1_5) || defined(GRUB_UTIL)	    
 //  char mbr[512];
@@ -7858,19 +9840,18 @@ partnew_func (char *arg, int flags)
       return 0;
     }
 
+  entry1 = current_partition >> 16;
+  
   /* The partition must a primary partition.  */
-  if ((current_partition >> 16) > 3
-      || (current_partition & 0xFFFF) != 0xFFFF)
+  if (entry1 > 3 || (current_partition & 0xFFFF) != 0xFFFF)
     {
       errnum = ERR_BAD_ARGUMENT;
       return 0;
     }
 
-  entry1 = current_partition >> 16;
-  
   /* Get the new partition type.  */
   arg = skip_to (0, arg);
-  if (! safe_parse_maxint (&arg, (int *)(void *)&new_type))
+  if (! safe_parse_maxint (&arg, &new_type))
     return 0;
 
   /* The partition type is unsigned char.  */
@@ -7885,8 +9866,8 @@ partnew_func (char *arg, int flags)
   filename = arg;
 
   current_drive_bak = 0;
-  if ((! safe_parse_maxint (&arg, (int *)(void *)&new_start))
-      || ((arg = skip_to (0, arg)), (! safe_parse_maxint (&arg, (int *)(void *)&new_len))))
+  if ((! safe_parse_maxint (&arg, &new_start))
+      || ((arg = skip_to (0, arg)), (! safe_parse_maxint (&arg, &new_len))))
   {
       current_drive_bak = current_drive;
       current_partition_bak = current_partition;
@@ -7933,7 +9914,7 @@ partnew_func (char *arg, int flags)
       if (new_start == part_start && part_start && new_len == 1)
 	new_len = part_length;
 
-      if (new_start < part_start || new_start + new_len > part_start + part_length)
+      if (new_start < part_start || new_start + new_len > (unsigned long)(part_start + part_length))
       {
 	if (debug > 0)
 	    grub_printf ("Cannot create a partition that exceeds the partition boundary.\n");
@@ -7941,7 +9922,7 @@ partnew_func (char *arg, int flags)
       }
     
       /* Read the first sector.  */
-      if (! rawread (current_drive, new_start, 0, SECTOR_SIZE, mbr))
+      if (! rawread (current_drive, new_start, 0, SECTOR_SIZE, (unsigned long long)(unsigned int)mbr, 0xedde0d90))
         return 0;
 
 #define	BS	((struct master_and_dos_boot_sector *)mbr)
@@ -7961,17 +9942,17 @@ partnew_func (char *arg, int flags)
 	}
 	if (debug > 0)
 	    grub_printf ("%s BPB found %s the leading 0xEB (jmp). Hidden sectors=0x%X\n",
-		filesystem_type == 1 ? "FAT12" :
+		(filesystem_type == 1 ? "FAT12" :
 		filesystem_type == 2 ? "FAT16" :
 		filesystem_type == 3 ? "FAT32" :
 		filesystem_type == 4 ? "NTFS"  :
-		/*filesystem_type == 5 ?*/ "EXT2 GRLDR",
-		BS->dummy1[0] == (char)0xEB ? "with" : "but WITHOUT",
+		/*filesystem_type == 5 ?*/ "EXT2 GRLDR"),
+		(BS->dummy1[0] == (char)0xEB ? "with" : "but WITHOUT"),
 		BS->hidden_sectors);
 	if (BS->hidden_sectors != new_start)
 	{
 	    if (debug > 0)
-		grub_printf ("Changing hidden sectors 0x%X to 0x%X... ", BS->hidden_sectors, new_start);
+		grub_printf ("Changing hidden sectors 0x%X to 0x%lX... ", BS->hidden_sectors, (unsigned long long)new_start);
 	    BS->hidden_sectors = new_start;
 	    /* Write back/update the boot sector.  */
 	    if (! rawwrite (current_drive, new_start, mbr))
@@ -7989,8 +9970,11 @@ partnew_func (char *arg, int flags)
 
       current_drive = current_drive_bak;
       current_partition = current_partition_bak;
-  } else {
-      /* this command in intended for running in command line and inhibited from running in menu.lst */
+  }
+#if 0
+  else
+  {
+      /* this command is intended for running in command line and inhibited from running in menu.lst */
       if (flags & (BUILTIN_MENU | BUILTIN_SCRIPT))
       {
 	if (debug > 0)
@@ -7998,9 +9982,10 @@ partnew_func (char *arg, int flags)
 	return ! (errnum = ERR_BAD_ARGUMENT);
       }
   }
+#endif
 
   /* Read the MBR.  */
-  if (! rawread (current_drive, 0, 0, SECTOR_SIZE, mbr))
+  if (! rawread (current_drive, 0, 0, SECTOR_SIZE, (unsigned long long)(unsigned int)mbr, 0xedde0d90))
     return 0;
 
   if (current_drive_bak)	/* creating a partition from a file */
@@ -8078,9 +10063,9 @@ partnew_func (char *arg, int flags)
 		    {
 		      if (PC_SLICE_FLAG (mbr, i) == 0x80)
 		      {
-			grub_printf ("The active flag(0x80) of partition %d was changed to 0.\n", i);
+			grub_printf ("The active flag(0x80) of partition %d was changed to 0.\n", (unsigned long)i);
 		      } else {
-			grub_printf ("The invalid active flag(0x%X) of partition %d was changed to 0.\n", PC_SLICE_FLAG (mbr, i), i);
+			grub_printf ("The invalid active flag(0x%X) of partition %d was changed to 0.\n", (unsigned long)(PC_SLICE_FLAG (mbr, i)), (unsigned long)i);
 		      }
 		    }
 
@@ -8128,7 +10113,7 @@ static struct builtin builtin_partnew =
 static int
 parttype_func (char *arg, int flags)
 {
-  int new_type = -1;
+  unsigned long long new_type = -1;
   unsigned long part = 0xFFFFFF;
   unsigned long start, len, offset, ext_offset1;
   unsigned long type, entry1;
@@ -8172,7 +10157,7 @@ parttype_func (char *arg, int flags)
     }
 
   /* The partition type is unsigned char.  */
-  if (new_type != -1 && ((unsigned long)new_type) > 0xFF)
+  if (new_type != -1 && new_type > 0xFF)
     {
       errnum = ERR_BAD_ARGUMENT;
       return 0;
@@ -8200,7 +10185,7 @@ parttype_func (char *arg, int flags)
 	  {
 		new_type = PC_SLICE_TYPE (mbr, entry1);
 		if (debug > 0)
-			printf ("Partition type for (hd%d,%d) is 0x%X.\n", (current_drive & 0x7F), (current_partition >> 16), new_type);
+			printf ("Partition type for (hd%d,%d) is 0x%X.\n", (current_drive & 0x7F), (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long)new_type);
 		return new_type;
 	  }
 
@@ -8213,7 +10198,7 @@ parttype_func (char *arg, int flags)
 	    break;	/* failure */
 
 	  if (debug > 0)
-		printf ("Partition type for (hd%d,%d) set to 0x%X successfully.\n", (current_drive & 0x7F), (current_partition >> 16), new_type);
+		printf ("Partition type for (hd%d,%d) set to 0x%X successfully.\n", (current_drive & 0x7F), (unsigned long)(unsigned char)(current_partition >> 16), (unsigned long)new_type);
 	  /* Succeed.  */
 	  errnum = 0;
 	  return 1;
@@ -8263,11 +10248,12 @@ password_func (char *arg, int flags)
       
       /* Wipe out any previously entered password */
       entered[0] = 0;
-      prompt = "Password: ";
-      maxlen = sizeof (entered) - 1;
-      echo_char = '*';
-      readline = 0;
-      get_cmdline (entered);
+      get_cmdline_str.prompt = "Password: ";
+      get_cmdline_str.maxlen = sizeof (entered) - 1;
+      get_cmdline_str.echo_char = '*';
+      get_cmdline_str.readline = 0;
+      get_cmdline_str.cmdline = entered;
+      get_cmdline (get_cmdline_str);
 
       nul_terminate (arg);
       if ((len = check_password (entered, arg, type)) != 0)
@@ -8319,7 +10305,7 @@ static int
 pause_func (char *arg, int flags)
 {
   char *p;
-  int wait = -1;
+  unsigned long long wait = -1;
   int time1;
   int time2 = -1;
 
@@ -8417,7 +10403,7 @@ static struct builtin builtin_quit =
 static int
 quit_func (char *arg, int flags)
 {
-  //long i;
+  unsigned long i;
   register long Sum;
   
   /* check if we were launched from DOS.  */
@@ -8543,55 +10529,458 @@ static struct builtin builtin_rarp =
 static int
 read_func (char *arg, int flags)
 {
-  int addr;
+  unsigned long long addr, val;
 
   if (! safe_parse_maxint (&arg, &addr))
     return 0;
 
+  val = *(unsigned long *)(unsigned long)(RAW_ADDR (addr));
   if (debug > 0)
-    grub_printf ("Address 0x%x: Value 0x%x\n",
-	       addr, *((unsigned *) RAW_ADDR (addr)));
-  return 1;
+    grub_printf ("Address 0x%lx: Value 0x%lx\n", addr, val);
+  return val;
 }
 
 static struct builtin builtin_read =
 {
   "read",
   read_func,
-  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT,
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
   "read ADDR",
   "Read a 32-bit value from memory at address ADDR and"
   " display it in hex format."
 };
+#endif /* ! GRUB_UTIL */
 
+
+int
+parse_string (char *arg)
+{
+  int len;
+  char *p;
+  char ch;
+  //int quote;
+
+  //nul_terminate (arg);
+	#if 1
+	for (len = 0,p = arg;(ch = *p);p++)
+	{
+		if (ch == '\\' && (ch = *++p))
+		{
+			switch(ch)
+			{
+				case 't':
+					*arg++ = '\t';
+					break;
+				case 'r':
+					*arg++ = '\r';
+					break;
+				case 'n':
+					*arg++ = '\n';
+					break;
+				case 'a':
+					*arg++ = '\a';
+					break;
+				case 'b':
+					*arg++ = '\b';
+					break;
+				case 'f':
+					*arg++ = '\f';
+					break;
+				case 'v':
+					*arg++ = '\v';
+					break;
+				case 'x':
+				{
+					/* hex */
+					int val;
+
+					p++;
+					ch = *p;
+					if (ch >= '0' && ch <= '9')
+						val = ch - '0';
+					else if (ch >= 'A' && ch <= 'F')
+						val = ch - 'A' + 10;
+					else if (ch >= 'a' && ch <= 'f')
+						val = ch - 'a' + 10;
+					else
+						return len;	/* error encountered */
+					
+					p++;
+					ch = *p;
+					
+					if (ch >= '0' && ch <= '9')
+						val = (val << 4) + ch - '0';
+					else if (ch >= 'A' && ch <= 'F')
+						val = (val << 4) + ch - 'A' + 10;
+					else if (ch >= 'a' && ch <= 'f')
+						val = (val << 4) + ch - 'a' + 10;
+					else
+						p--;
+					
+					*arg++ = val;
+				}
+					break;
+				default:
+					if (ch >= '0' && ch <= '7')
+					{
+						/* octal */
+						int val = ch - '0';
+						int i;
+						
+						for (i=0;i<2 && p[1] >= '0' && p[1] <= '7';i++)
+						{
+							p++;
+							val <<= 3;
+							val += *p - '0';
+						}
+						
+						*arg++ = val;
+						break;
+					} else *arg++ = ch;
+			}
+		} else *arg++ = ch;
+		
+		len++;
+	}
+	#else
+  for (quote = len = 0, p = arg; (ch = *p); p++)
+  {
+	if (ch == '\\')
+	{
+		if (quote)
+		{
+			*arg++ = ch;
+			len++;
+			quote = 0;
+			continue;
+		}
+		quote = 1;
+		continue;
+	}
+	if (quote)
+	{
+		if (ch == 't')
+		{
+			*arg++ = '\t';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'r')
+		{
+			*arg++ = '\r';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'n')
+		{
+			*arg++ = '\n';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'a')
+		{
+			*arg++ = '\a';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'b')
+		{
+			*arg++ = '\b';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'f')
+		{
+			*arg++ = '\f';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'v')
+		{
+			*arg++ = '\v';
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch >= '0' && ch <= '7')
+		{
+			/* octal */
+			int val = ch - '0';
+
+			if (p[1] >= '0' && p[1] <= '7')
+			{
+				val *= 8;
+				p++;
+				val += *p -'0';
+				if (p[1] >= '0' && p[1] <= '7')
+				{
+					val *= 8;
+					p++;
+					val += *p -'0';
+				}
+			}
+			*arg++ = val;
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch == 'x')
+		{
+			/* hex */
+			int val;
+
+			p++;
+			ch = *p;
+			if (ch >= '0' && ch <= '9')
+				val = ch - '0';
+			else if (ch >= 'A' && ch <= 'F')
+				val = ch - 'A' + 10;
+			else if (ch >= 'a' && ch <= 'f')
+				val = ch - 'a' + 10;
+			else
+				return len;	/* error encountered */
+			p++;
+			ch = *p;
+			if (ch >= '0' && ch <= '9')
+				val = val * 16 + ch - '0';
+			else if (ch >= 'A' && ch <= 'F')
+				val = val * 16 + ch - 'A' + 10;
+			else if (ch >= 'a' && ch <= 'f')
+				val = val * 16 + ch - 'A' + 10;
+			else
+				p--;
+			*arg++ = val;
+			len++;
+			quote = 0;
+			continue;
+		}
+		if (ch)
+		{
+			*arg++ = ch;
+			len++;
+			quote = 0;
+			continue;
+		}
+		return len;
+	}
+	*arg++ = ch;
+	len++;
+	quote = 0;
+  }
+  #endif
+//  if (*arg) *arg = 0;
+  return len;
+}
+
+#ifndef GRUB_UTIL
 static int
 write_func (char *arg, int flags)
 {
-  int addr;
-  int val;
+  unsigned long long addr;
+  unsigned long long val;
+  char *p;
+  unsigned long tmp_drive;
+  unsigned long tmp_partition;
+  unsigned long long offset;
+  unsigned long long len;
+  char tmp_file[16];
+  //int block_file = 0;
 
-  if (! safe_parse_maxint (&arg, &addr))
-    return 0;
+  tmp_drive = saved_drive;
+  tmp_partition = saved_partition;
+  offset = 0;
+  for (;;)
+  {
+    if (grub_memcmp (arg, "--offset=", 9) == 0)
+      {
+	p = arg + 9;
+	if (! safe_parse_maxint (&p, &offset))
+		return 0;
+      }
+    else
+	break;
+    arg = skip_to (0, arg);
+  }
+  
+  p = NULL;
+  addr = -1;
+  if (*arg == '/' || *arg == '(')
+  {
+	/* destination is device or file. */
+  	if (*arg == '(')
+	{
+		p = set_device (arg);
+		if (errnum)
+			goto fail;
+		if (! p)
+		{
+			if (errnum == 0)
+				errnum = ERR_BAD_ARGUMENT;
+			goto fail;
+		}
+		//if (*p != '/')
+		//	block_file = 1;
+		saved_drive = current_drive;
+		saved_partition = current_partition;
+		/* if only the device portion is specified */
+		if ((unsigned char)*p <= ' ')
+		{
+			p = tmp_file;
+			*p++ = '(';
+			*p++ = ')';
+			*p++ = '+';
+			*p++ = '1';
+			*p = 0;
+			p = tmp_file;
+			grub_open (p);
+			if (errnum)
+				goto fail;
+			grub_sprintf (p + 3, "0x%lx", (unsigned long long)part_length);
+			grub_close ();
+		}
+	}
+	if (p != tmp_file)
+	    p = arg;
+	grub_open (p);
+	current_drive = saved_drive;
+	current_partition = saved_partition;
+	if (errnum)
+		goto fail;
 
-  arg = skip_to (0, arg);
-  
-  if (! safe_parse_maxint (&arg, &val))
-    return 0;
-  
-  *((unsigned *) RAW_ADDR (addr)) = (unsigned)val;
-  if (debug > 0)
-    grub_printf ("Address 0x%x: Value 0x%x\n",
-	       addr, *((unsigned *) RAW_ADDR (addr)));
-  return 1;
+#if 0
+	if (current_drive != ram_drive && current_drive != 0xFFFF && block_file)
+	{
+		unsigned long j;
+
+		/* check if it is a mapped memdrive */
+		j = DRIVE_MAP_SIZE;		/* real drive */
+#ifndef GRUB_UTIL
+		if (! unset_int13_handler (1))	/* map is hooked */
+		    for (j = 0; j < DRIVE_MAP_SIZE; j++)
+		    {
+			if (drive_map_slot_empty (hooked_drive_map[j]))
+			{
+				j = DRIVE_MAP_SIZE;	/* real drive */
+				break;
+			}
+
+			if (current_drive == hooked_drive_map[j].from_drive && hooked_drive_map[j].to_drive == 0xFF && !(hooked_drive_map[j].to_cylinder & 0x4000))
+				break;			/* memdrive */
+		    }
+#endif /* ! GRUB_UTIL */
+
+		if (j == DRIVE_MAP_SIZE)	/* real drive */
+		{
+		    /* this command is intended for running in command line and inhibited from running in menu.lst */
+		    if (flags & (BUILTIN_MENU | BUILTIN_SCRIPT))
+		    {
+			grub_close ();
+			errnum = ERR_WRITE_TO_NON_MEM_DRIVE;
+			goto fail;
+		    }
+		}
+	}
+#endif
+
+	filepos = offset;
+  }
+  else
+  {
+	/* destination is memory address. */
+	if (*arg < '0' || *arg > '9')
+	{
+		errnum = ERR_BAD_ARGUMENT;
+		goto fail;
+	}
+	if (! safe_parse_maxint (&arg, &addr))
+		goto fail;
+	if (addr == -1)
+	{
+		errnum = ERR_BAD_ARGUMENT;
+		goto fail;
+	}
+  }
+
+  /* destination is device or file if addr == -1 */
+  /* destination is memory address if addr != -1 */
+
+  arg = skip_to (0, arg);	/* INTEGER_OR_STRING */
+
+  if (addr == -1)
+  {
+	/* string */
+	if (! *arg)
+	{
+		grub_close ();
+		errnum = ERR_BAD_ARGUMENT;
+		goto fail;
+	}
+	len = parse_string (arg);
+	if (saved_drive == 0xFFFF && p == tmp_file)	/* (md) */
+	{
+		grub_close ();
+		grub_memmove64 (offset, (unsigned long long)(unsigned int)arg, len);
+		if ((unsigned long)&saved_drive + 3 >= offset && (unsigned long)&saved_drive < offset + len)
+			tmp_drive = saved_drive;
+		if ((unsigned long)&saved_partition + 3 >= offset && (unsigned long)&saved_partition < offset + len)
+			tmp_partition = saved_partition;
+		errnum = 0;
+		goto succ;
+	}
+	/* write file */
+	if (len > filemax - filepos)
+	    len = filemax - filepos;
+	if (grub_read ((unsigned long long)(unsigned int)arg, len, 0x900ddeed) != len)	/* write */
+	{
+		if (errnum == 0)
+			errnum = ERR_WRITE;
+	}
+	{
+		int err = errnum;
+		grub_close ();
+		errnum = err;
+	}
+succ:
+	if (errnum == 0 && debug > 0)
+		grub_printf ("0x%lX bytes written at offset 0x%lX.\n", (unsigned long long)len, (unsigned long long)offset);
+  }
+  else
+  {
+	/* integer */
+	p = arg;
+	if (! safe_parse_maxint (&p, &val))
+		goto fail;
+	*((unsigned *)(unsigned int) RAW_ADDR (addr += offset)) = (unsigned)val;
+	if (debug > 0)
+		grub_printf ("Address 0x%lx: Value 0x%x\n", (unsigned long long)addr, (*((unsigned *)(unsigned int) RAW_ADDR (addr))));
+	if (addr != (int)&saved_drive)
+		saved_drive = tmp_drive;
+	if (addr != (int)&saved_partition)
+		saved_partition = tmp_partition;
+	errnum = 0;
+	return val;
+  }
+
+fail:
+
+  saved_drive = tmp_drive;
+  saved_partition = tmp_partition;
+  return !(errnum);
 }
 
 static struct builtin builtin_write =
 {
   "write",
   write_func,
-  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT,
-  "write ADDR VAL",
-  "Write a 32-bit value VAL to memory at address ADDR."
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
+  "write [--offset=SKIP] ADDR_OR_FILE INTEGER_OR_STRING",
+  "Write a 32-bit value to memory or write a string to file(or device!)."
 };
 
 
@@ -8625,33 +11014,34 @@ print_root_device (void)
       /* Network drive.  */
       grub_printf (" (nd):");
     }
-  else if (saved_drive & 0x80)
-    {
-      /* Hard disk drive.  */
-      grub_printf (" (hd%d", saved_drive - 0x80);
-      
+  else
+    { 
+      if (saved_drive & 0x80)
+	{
+	  /* Hard disk drive.  */
+	  grub_printf (" (hd%d", (saved_drive - 0x80));
+	}
+      else
+	{
+	  /* Floppy disk drive.  */
+	  grub_printf (" (fd%d", saved_drive);
+	}
+
       if ((saved_partition & 0xFF0000) != 0xFF0000)
-	grub_printf (",%d", saved_partition >> 16);
+	grub_printf (",%d", (unsigned long)(unsigned char)(saved_partition >> 16));
 
       if ((saved_partition & 0x00FF00) != 0x00FF00)
-	grub_printf (",%c", ((saved_partition >> 8) & 0xFF) + 'a');
+	grub_printf (",%c", (unsigned long)(unsigned char)((saved_partition >> 8) + 'a'));
 
       grub_printf ("):");
-    }
-  else
-    {
-      /* Floppy disk drive.  */
-      grub_printf (" (fd%d):", saved_drive);
     }
 }
 
 static int
 real_root_func (char *arg, int attempt_mnt)
 {
-  int hdbias = 0;
-  char *biasptr;
   char *next;
-  unsigned long tmp_drive = 0;
+  unsigned long i, tmp_drive = 0;
   unsigned long tmp_partition = 0;
   char ch;
 
@@ -8772,15 +11162,18 @@ real_root_func (char *arg, int attempt_mnt)
       if (! open_device () && errnum != ERR_FSYS_MOUNT)
 	return 0;
 
+#if 1
       if (next)
       {
+	unsigned long long hdbias = 0;
+	char *biasptr;
+
 	/* BSD and chainloading evil hacks !!  */
 	biasptr = skip_to (0, next);
 	safe_parse_maxint (&biasptr, &hdbias);
 	errnum = 0;
 	bootdev = set_bootdev (hdbias);
       }
-#if 0
       if (errnum)
 	return 0;
 #endif
@@ -8798,6 +11191,7 @@ real_root_func (char *arg, int attempt_mnt)
       else
 	return ! (errnum = ERR_FSYS_MOUNT);
     }
+#if 1
   else if (next)
     {
       /* This is necessary, because the location of a partition table
@@ -8805,12 +11199,11 @@ real_root_func (char *arg, int attempt_mnt)
       if (open_partition ())
 	{
 	  set_bootdev (0);
-#if 0
 	  if (errnum)
 	    return 0;
-#endif
 	}
     }
+#endif
   
   if (next)
   {
@@ -8937,8 +11330,8 @@ static int time2;
 static unsigned long saved_sectors[2];
 static unsigned long saved_offsets[2];
 static unsigned long saved_lengths[2];
-static int wait;
-static unsigned long entryno;
+static unsigned long long wait;
+static unsigned long long entryno;
 static char *default_file;
 static int c;
 static int deny_write;
@@ -9063,7 +11456,7 @@ savedefault_func (char *arg, int flags)
     {
       if (grub_memcmp (arg, "fallback", sizeof ("fallback") - 1) == 0)
 	{
-	  //int i;
+	  int i;
 	  int index = 0;
 	  
 	  for (i = 0; i < MAX_FALLBACK_ENTRIES; i++)
@@ -9086,7 +11479,7 @@ savedefault_func (char *arg, int flags)
 
 	  entryno = fallback_entries[index];
 	}
-      else if (! safe_parse_maxint (&arg, (int *)(void *)&entryno))
+      else if (! safe_parse_maxint (&arg, &entryno))
 	return 0;
     }
   else
@@ -9111,7 +11504,7 @@ savedefault_func (char *arg, int flags)
 
       saved_lengths[0] = 0;
       disk_read_hook = disk_read_savesect_func1;
-      len = grub_read (mbr, 512);
+      len = grub_read ((unsigned long long)(unsigned int)mbr, 512, 0xedde0d90);
       disk_read_hook = 0;
       grub_close ();
       
@@ -9134,14 +11527,12 @@ savedefault_func (char *arg, int flags)
       while (p < mbr + len - 100 &&
 	  grub_memcmp (++p, warning_defaultfile, 73));
 
-      //grub_printf ("p=%x, mbr=%x, len=%x, mbr + len - 160 = %x\n", p, mbr, len, mbr + len - 160);
       if (p > mbr + len - 160)
 	{
 	  errnum = ERR_DEFAULT_FILE;
 	  goto fail;
 	}
 
-//grub_printf("sector_count=%x, saved_sectors[0]=%x, saved_sectors[1]=%x, saved_offsets[0]=%x, saved_offsets[1]=%x, saved_lengths[0]=%x, saved_lengths[1]=%x\n", sector_count, saved_sectors[0], saved_sectors[1], saved_offsets[0], saved_offsets[1], saved_lengths[0], saved_lengths[1]);
       if (blklst_num_sectors > 2 || blklst_num_sectors <= 0 || saved_lengths[0] <= 0 || saved_lengths[0] > SECTOR_SIZE)
 	{
 	  /* Is this possible?! Too fragmented!  */
@@ -9157,7 +11548,7 @@ savedefault_func (char *arg, int flags)
 //      if (saved_lengths[0] < len)
 //	{
 	  //char sect[512];
-	  if (! rawread (current_drive, saved_sectors[0], 0, SECTOR_SIZE, mbr))
+	  if (! rawread (current_drive, saved_sectors[0], 0, SECTOR_SIZE, (unsigned long long)(unsigned int)mbr, 0xedde0d90))
 	    goto fail;
 	  
 	  len1 = saved_lengths[0] < len ? saved_lengths[0] : len;
@@ -9192,7 +11583,7 @@ savedefault_func (char *arg, int flags)
 	  if (saved_lengths[0] < len)
 	  {
 	    /* write the rest bytes to the second sector */
-	    if (! rawread (current_drive, saved_sectors[1], 0, 512, mbr))
+	    if (! rawread (current_drive, saved_sectors[1], 0, 512, (unsigned long long)(unsigned int)mbr, 0xedde0d90))
 		goto fail;
 	    
 	    /* skip the write if possible. */
@@ -9286,7 +11677,7 @@ serial_func (char *arg, int flags)
       if (grub_memcmp (arg, "--unit=", sizeof ("--unit=") - 1) == 0)
 	{
 	  char *p = arg + sizeof ("--unit=") - 1;
-	  int unit;
+	  unsigned long long unit;
 	  
 	  if (! safe_parse_maxint (&p, &unit))
 	    return 0;
@@ -9302,7 +11693,7 @@ serial_func (char *arg, int flags)
       else if (grub_memcmp (arg, "--speed=", sizeof ("--speed=") - 1) == 0)
 	{
 	  char *p = arg + sizeof ("--speed=") - 1;
-	  int num;
+	  unsigned long long num;
 	  
 	  if (! safe_parse_maxint (&p, &num))
 	    return 0;
@@ -9312,7 +11703,7 @@ serial_func (char *arg, int flags)
       else if (grub_memcmp (arg, "--port=", sizeof ("--port=") - 1) == 0)
 	{
 	  char *p = arg + sizeof ("--port=") - 1;
-	  int num;
+	  unsigned long long num;
 	  
 	  if (! safe_parse_maxint (&p, &num))
 	    return 0;
@@ -9322,7 +11713,7 @@ serial_func (char *arg, int flags)
       else if (grub_memcmp (arg, "--word=", sizeof ("--word=") - 1) == 0)
 	{
 	  char *p = arg + sizeof ("--word=") - 1;
-	  int len;
+	  unsigned long long len;
 	  
 	  if (! safe_parse_maxint (&p, &len))
 	    return 0;
@@ -9341,7 +11732,7 @@ serial_func (char *arg, int flags)
       else if (grub_memcmp (arg, "--stop=", sizeof ("--stop=") - 1) == 0)
 	{
 	  char *p = arg + sizeof ("--stop=") - 1;
-	  int len;
+	  unsigned long long len;
 	  
 	  if (! safe_parse_maxint (&p, &len))
 	    return 0;
@@ -9510,7 +11901,7 @@ static int find_ascii_code (char *key);
 static int
 find_key_code (char *key)
 {
-      //int i;
+      int i;
 
       for (i = 0; i < sizeof (keysym_table) / sizeof (keysym_table[0]); i++)
 	{
@@ -9528,7 +11919,7 @@ find_key_code (char *key)
 static int
 find_ascii_code (char *key)
 {
-      //int i;
+      int i;
       
       for (i = 0; i < sizeof (keysym_table) / sizeof (keysym_table[0]); i++)
 	{
@@ -9587,7 +11978,7 @@ setkey_func (char *arg, int flags)
   
   if (map_in_interrupt)
     {
-      //int i;
+      int i;
       
       /* Find an empty slot.  */
       for (i = 0; i < KEY_MAP_SIZE; i++)
@@ -9622,7 +12013,7 @@ setkey_func (char *arg, int flags)
     }
   else
     {
-      //int i;
+      int i;
       
       /* Find an empty slot.  */
       for (i = 0; i < KEY_MAP_SIZE; i++)
@@ -9671,6 +12062,7 @@ static struct builtin builtin_setkey =
 };
 
 
+#ifdef GRUB_UTIL
 struct stage1_5_map {
     char *fsys;
     char *name;
@@ -9691,6 +12083,9 @@ static struct stage1_5_map stage1_5_map[] =
 };
 
 #ifdef GRUB_UTIL
+static int check_file (char *file);
+static void sprint_device (int drive, int partition);
+static int embed_stage1_5 (char *stage1_5, int drive, int partition, int flags);
 static char device[16];
 static char tmp[16];
 static char stage15[64];
@@ -9712,10 +12107,6 @@ static char *real_config_filename = (char *)(HMA_ADDR - 0x40);//(char *)0x81C0;	
 #endif
 static char *buffer;
 
-static int check_file (char *file);
-static void sprint_device (int drive, int partition);
-static int embed_stage1_5 (char *stage1_5, int drive, int partition, int flags);
-  
   /* Check if the file FILE exists like Autoconf.  */
 static int
 check_file (char *file)
@@ -9740,18 +12131,18 @@ static void
 sprint_device (int drive, int partition)
 {
       grub_sprintf (device, "(%cd%d",
-		    (drive & 0x80) ? 'h' : 'f',
-		    drive & ~0x80);
+		    ((drive & 0x80) ? 'h' : 'f'),
+		    (drive & ~0x80));
       if ((partition & 0xFF0000) != 0xFF0000)
 	{
 	  //char tmp[16];
-	  grub_sprintf (tmp, ",%d", (partition >> 16) & 0xFF);
+	  grub_sprintf (tmp, ",%d", (unsigned long)(unsigned char)(partition >> 16));
 	  grub_strncat (device, tmp, 16);
 	}
       if ((partition & 0x00FF00) != 0x00FF00)
 	{
 	  //char tmp[16];
-	  grub_sprintf (tmp, ",%c", 'a' + ((partition >> 8) & 0xFF));
+	  grub_sprintf (tmp, ",%c", (unsigned long)(unsigned char)('a' + (partition >> 8)));
 	  grub_strncat (device, tmp, 16);
 	}
       grub_strncat (device, ")", 16);
@@ -9899,7 +12290,7 @@ setup_func (char *arg, int flags)
 
   {
     char *fsys = fsys_table[fsys_type].name;
-    //int i;
+    int i;
     int size = sizeof (stage1_5_map) / sizeof (stage1_5_map[0]);
     
     /* Iterate finding the same filesystem name as FSYS.  */
@@ -9933,11 +12324,11 @@ setup_func (char *arg, int flags)
 #if 1
   /* Don't embed a drive number unnecessarily.  */
   grub_sprintf (cmd_arg, "%s%s%s%s %s%s %s p %s %s",
-		is_force_lba? "--force-lba " : "",
-		stage2_arg? stage2_arg : "",
-		stage2_arg? " " : "",
+		(is_force_lba? "--force-lba " : ""),
+		(stage2_arg? stage2_arg : ""),
+		(stage2_arg? " " : ""),
 		stage1,
-		(installed_drive != image_drive) ? "d " : "",
+		((installed_drive != image_drive) ? "d " : ""),
 		device,
 		stage2,
 		config_filename,
@@ -9951,9 +12342,9 @@ setup_func (char *arg, int flags)
      drive or not. If the problem still exists, it would be necessary to
      switch back to this code.  */
   grub_sprintf (cmd_arg, "%s%s%s%s d %s %s p %s %s",
-		is_force_lba? "--force-lba " : "",
-		stage2_arg? stage2_arg : "",
-		stage2_arg? " " : "",
+		(is_force_lba? "--force-lba " : ""),
+		(stage2_arg? stage2_arg : ""),
+		(stage2_arg? " " : ""),
 		stage1,
 		device,
 		stage2,
@@ -10000,6 +12391,7 @@ static struct builtin builtin_setup =
   " partition where GRUB images reside, specify the option `--stage2'"
   " to tell GRUB the file name under your OS."
 };
+#endif /* GRUB_UTIL */
 
 
 #if defined(SUPPORT_SERIAL) || defined(SUPPORT_HERCULES) || defined(SUPPORT_GRAPHICS)
@@ -10010,8 +12402,8 @@ terminal_func (char *arg, int flags)
   /* The index of the default terminal in TERM_TABLE.  */
   int default_term = -1;
   struct term_entry *prev_term = current_term;
-  int to = -1;
-  int lines = 0;
+  unsigned long long to = -1;
+  unsigned long long lines = 0;
   int no_message = 0;
   unsigned long term_flags = 0;
   /* XXX: Assume less than 32 terminals.  */
@@ -10062,15 +12454,15 @@ terminal_func (char *arg, int flags)
       if (debug > 0)
 	grub_printf ("%s%s%s%s\n",
 		   current_term->name,
-		   current_term->flags & TERM_DUMB ? " (dumb)" : "",
-		   current_term->flags & TERM_NO_EDIT ? " (no edit)" : "",
-		   current_term->flags & TERM_NO_ECHO ? " (no echo)" : "");
+		   (current_term->flags & TERM_DUMB ? " (dumb)" : ""),
+		   (current_term->flags & TERM_NO_EDIT ? " (no edit)" : ""),
+		   (current_term->flags & TERM_NO_ECHO ? " (no echo)" : ""));
       return 1;
     }
 
   while (*arg)
     {
-      //int i;
+      int i;
       char *next = skip_to (0, arg);
       
       nul_terminate (arg);
@@ -10118,7 +12510,7 @@ terminal_func (char *arg, int flags)
       /* Wait for a key input.  */
       while (to)
 	{
-	  //int i;
+	  int i;
 
 	  for (i = 0; term_table[i].name; i++)
 	    {
@@ -10248,7 +12640,7 @@ terminfo_func (char *arg, int flags)
       
       while (*arg)
 	{
-	  //int i;
+	  int i;
 	  char *next = skip_to (0, arg);
 	      
 	  nul_terminate (arg);
@@ -10288,15 +12680,15 @@ terminfo_func (char *arg, int flags)
       ti_get_term (term);
 
       grub_printf ("name=%s\n",
-		   ti_escape_string (term->name));
+		   (ti_escape_string (term->name)));
       grub_printf ("cursor_address=%s\n",
-		   ti_escape_string (term->cursor_address));
+		   (ti_escape_string (term->cursor_address)));
       grub_printf ("clear_screen=%s\n",
-		   ti_escape_string (term->clear_screen));
+		   (ti_escape_string (term->clear_screen)));
       grub_printf ("enter_standout_mode=%s\n",
-		   ti_escape_string (term->enter_standout_mode));
+		   (ti_escape_string (term->enter_standout_mode)));
       grub_printf ("exit_standout_mode=%s\n",
-		   ti_escape_string (term->exit_standout_mode));
+		   (ti_escape_string (term->exit_standout_mode)));
     }
 
   return 1;
@@ -10421,7 +12813,7 @@ static struct vbe_mode *mode = (struct vbe_mode *)0x700;//use 255 bytes
 static int
 testvbe_func (char *arg, int flags)
 {
-  int mode_number;
+  unsigned long long mode_number;
 //  struct vbe_controller controller;	//struct size 512
 //  struct vbe_mode mode;			//struct size 255
   
@@ -10449,8 +12841,8 @@ testvbe_func (char *arg, int flags)
     {
       if (debug > 0)
 	grub_printf (" VBE version %d.%d is not supported.\n",
-		   (int) (controller->version >> 8),
-		   (int) (controller->version & 0xFF));
+		    (unsigned long)(controller->version >> 8),
+		    (unsigned long)(unsigned char)(controller->version));
       return 0;
     }
 
@@ -10492,7 +12884,7 @@ testvbe_func (char *arg, int flags)
 	    for (x = 0; x < width; x++)
 	      {
 		unsigned char *buf = line_buf + bpp * x;
-		//int i;
+		int i;
 
 		for (i = 0; i < bpp; i++, buf++)
 		  *buf = (color >> (i * 8)) & 0xff;
@@ -10545,7 +12937,7 @@ find_video_mode(/*struct vbe_controller *controller,*/ int width, int height, in
 {
   // if height == depth == 0, then width is not a width but a mode number
 //  static struct vbe_mode mode;
-//  int i;
+  int i;
   
   if (!height && !depth) {
     if (get_vbe_mode_info (width, mode) == 0x004F)
@@ -10567,12 +12959,12 @@ find_video_mode(/*struct vbe_controller *controller,*/ int width, int height, in
 
       if (debug > 0)
 	printf("Mode (0x%x) %dx%dx%d %x %x\n",
-		      i,
-		      mode->x_resolution,
-		      mode->y_resolution,
-		      mode->bits_per_pixel,
-		      mode->mode_attributes,
-		      mode->phys_base);
+		      (unsigned long)i,
+		      (unsigned long)mode->x_resolution,
+		      (unsigned long)mode->y_resolution,
+		      (unsigned long)mode->bits_per_pixel,
+		      (unsigned long)mode->mode_attributes,
+		      (unsigned long)mode->phys_base);
 
       if ((mode->x_resolution == width) &&
 	  (mode->y_resolution == height) &&
@@ -10590,9 +12982,9 @@ static int
 setvbe_func (char *arg, int flags)
 {
   int mode_number;
-  int width = 10000;
-  int height = 10000;
-  int depth = 128;
+  unsigned long long width = 10000;
+  unsigned long long height = 10000;
+  unsigned long long depth = 128;
 
 //  struct vbe_controller controller;	//struct size 512
 //  struct vbe_mode mode;			//struct size 255
@@ -10622,7 +13014,7 @@ setvbe_func (char *arg, int flags)
   }
 
   if (debug > 0)
-    grub_printf ("Trying setvbe for resolution %dx%dx%d\n", width, height, depth);
+    grub_printf ("Trying setvbe for resolution %dx%dx%d\n", (unsigned long)width, (unsigned long)height, (unsigned long)depth);
 
   /* Preset `VBE2'.  */
   grub_memmove (controller->signature, "VBE2", 4);
@@ -10639,8 +13031,8 @@ setvbe_func (char *arg, int flags)
     {
       if (debug > 0)
 	grub_printf (" VBE version %d.%d is not supported.\n",
-		   (int) (controller->version >> 8),
-		   (int) (controller->version & 0xFF));
+		   (unsigned long) (controller->version >> 8),
+		   (unsigned long)(unsigned char) (controller->version));
       return 0;
     }
 
@@ -10649,7 +13041,7 @@ setvbe_func (char *arg, int flags)
   if (!mode2)
     {
       if (debug > 0)
-	grub_printf (" Resolution %dx%dx%d not found. Try vbeprobe command to see available modes\n", width, height, depth);
+	grub_printf (" Resolution %dx%dx%d not found. Try vbeprobe command to see available modes\n", (unsigned long)width, (unsigned long)height, (unsigned long)depth);
       return 0;
     }
 
@@ -10657,11 +13049,11 @@ setvbe_func (char *arg, int flags)
   if (set_vbe_mode (mode_number | (1 << 14)) != 0x004F)
     {
       if (debug > 0)
-	grub_printf (" Switching to Mode 0x%x failed.\n", mode_number);
+	grub_printf (" Switching to Mode 0x%x failed.\n", (unsigned long)mode_number);
       return 0;
     }
 
-  grub_sprintf (kernel_option_video, " video=%dx%dx%d@0x%x,%d", mode2->x_resolution, mode2->y_resolution, mode2->bits_per_pixel, mode2->phys_base, (controller->version >= 0x0300) ? (mode2->linear_bytes_per_scanline) : (mode2->bytes_per_scanline));
+  grub_sprintf (kernel_option_video, " video=%dx%dx%d@0x%x,%d", mode2->x_resolution, mode2->y_resolution, mode2->bits_per_pixel, mode2->phys_base, ((controller->version >= 0x0300) ? (mode2->linear_bytes_per_scanline) : (mode2->bytes_per_scanline)));
 
   if (debug > 0)
     grub_printf ("\nThe option \"%s\" will be automatically\nappended to each subsequent kernel command-line.\n", kernel_option_video);
@@ -10712,9 +13104,11 @@ static struct builtin builtin_tftpserver =
 static int
 timeout_func (char *arg, int flags)
 {
-  if (! safe_parse_maxint (&arg, &grub_timeout))
+  unsigned long long ull;
+  if (! safe_parse_maxint (&arg, &ull))
     return 0;
 
+  grub_timeout = ull;
   return 1;
 }
 
@@ -10732,18 +13126,18 @@ static struct builtin builtin_timeout =
 
 
 /* title */
-static int
-title_func (char *arg, int flags)
-{
-  /* This function is not actually used at least currently.  */
-  return 1;
-}
+//static int
+//title_func (char *arg, int flags)
+//{
+//  /* This function is not actually used at least currently.  */
+//  return 1;
+//}
 
-static struct builtin builtin_title =
+struct builtin builtin_title =
 {
   "title",
-  title_func,
-  BUILTIN_TITLE,
+  NULL/*title_func*/,
+  0/*BUILTIN_TITLE*/,
 #if 0
   "title [NAME ...]",
   "Start a new boot entry, and set its name to the contents of the"
@@ -10841,7 +13235,7 @@ vbeprobe_func (char *arg, int flags)
 {
 //  struct vbe_controller controller;	//struct size 512
   unsigned short *mode_list;
-  int mode_number = -1;
+  unsigned long long mode_number = -1;
   
   if (*arg)
     {
@@ -10864,16 +13258,16 @@ vbeprobe_func (char *arg, int flags)
     {
       if (debug > 0)
 	grub_printf (" VBE version %d.%d is not supported.\n",
-		   (int) (controller->version >> 8),
-		   (int) (controller->version & 0xFF));
+		   (unsigned long) (controller->version >> 8),
+		   (unsigned long)(unsigned char) (controller->version));
       return 0;
     }
 
   /* Print some information.  */
   if (debug > 0)
     grub_printf (" VBE version %d.%d\n",
-	       (int) (controller->version >> 8),
-	       (int) (controller->version & 0xFF));
+	       (unsigned long) (controller->version >> 8),
+	       (unsigned long)(unsigned char) (controller->version));
 
   /* Iterate probing modes.  */
   for (mode_list
@@ -10909,11 +13303,11 @@ vbeprobe_func (char *arg, int flags)
 	  
 	  if (debug > 0)
 	    grub_printf ("  0x%x: %s, %ux%ux%u\n",
-		       (unsigned) *mode_list,
+		       (unsigned long) *mode_list,
 		       model,
-		       (unsigned) mode->x_resolution,
-		       (unsigned) mode->y_resolution,
-		       (unsigned) mode->bits_per_pixel);
+		       (unsigned long) mode->x_resolution,
+		       (unsigned long) mode->y_resolution,
+		       (unsigned long) mode->bits_per_pixel);
 	  
 	  if (mode_number != -1)
 	    break;
@@ -10922,7 +13316,7 @@ vbeprobe_func (char *arg, int flags)
 
   if (mode_number != -1 && mode_number != *mode_list)
     if (debug > 0)
-      grub_printf ("  Mode 0x%x is not found or supported.\n", mode_number);
+      grub_printf ("  Mode 0x%x is not found or supported.\n", (unsigned long)mode_number);
   
   return 1;
 }
@@ -10938,6 +13332,158 @@ static struct builtin builtin_vbeprobe =
 };
   
 
+int
+builtin_cmd (char *cmd, char *arg, int flags)
+{
+	struct builtin *builtin1 = 0;
+
+	builtin1 = find_command (cmd);
+  
+	if ((int)builtin1 != -1)
+	{
+		if (! builtin1 || ! (builtin1->flags & flags))
+		{
+			errnum = ERR_UNRECOGNIZED;
+			return 0;
+		}
+		else
+		{
+			return (builtin1->func) (arg, flags);
+		}
+	}
+	return 0;
+/*	if ((int)builtin1 != -1)
+	{
+		return (builtin1->func) (arg, flags);
+	}
+	else
+	{
+		return command_func (arg, flags);
+	}
+*/
+}
+
+static unsigned long long read_val(char **str_ptr)
+{
+	char *p;
+	char *arg = *str_ptr;
+	unsigned long long val_t;
+	unsigned long long val;
+	while (*arg == ' ' || *arg == '\t') arg++;
+	p = arg;
+	if (*arg == '*') arg++;
+	if (! safe_parse_maxint_with_suffix (&arg, &val_t , 0))
+	{
+		return 0;
+	}
+	val = val_t;
+	if (*p == '*')
+	{
+		val = *(unsigned long long *)(unsigned long)val_t;
+	}
+	while (*arg == ' ' || *arg == '\t') arg++;
+	*str_ptr = arg;
+	return val;
+}
+
+static int
+calc_func (char *arg, int flags)
+{
+	unsigned long long val_t;
+	unsigned long long *val, val1, val2 = 0;
+	char O;
+	char *P = arg;
+	if (*P == '*') arg++;
+	if (! safe_parse_maxint_with_suffix (&arg, &val_t, 0))
+	{
+		return 0;
+	}
+	val1 = val_t;
+	val = &val1;
+	if (*P == '*') 
+	{
+		val = (unsigned long long *)(unsigned long)(val_t);
+		val1 = *val;
+	}
+	
+	while (*arg == ' ' || *arg == '\t') arg++;
+	if (*arg == '=')
+	{
+		arg++;
+		val1 = read_val(&arg);
+		*val = val1;
+	}
+	while (*arg)
+	{
+		val2 = 0ULL;
+		O = *arg;
+		arg++;
+		if (O == '>' || O == '<')
+		{
+			if (*arg != O)
+				return 0;
+			arg++;
+		}
+		else if ((O == '+' || O == '-') && (*arg == O))
+		{
+			val2 = 1ULL;
+			arg++;
+		}
+		if (!val2)
+			val2 = read_val(&arg);
+		switch(O)
+		{
+			case '+':
+				*val += val2;
+				break;
+			case '-':
+				*val -= val2;
+				break;
+			case '*':
+				*val *= val2;
+				break;
+			case '/':
+				*(unsigned long *)val /= (unsigned long)val2;
+				break;
+			case '%':
+				*(unsigned long *)val %= (unsigned long)val2;
+				break;
+			case '&':
+				*val &= val2;
+				break;
+			case '|':
+				*val |= val2;
+				break;
+			case '^':
+				*val ^= val2;
+				break;
+			case '<':
+				*val <<= val2;
+				break;
+			case '>':
+				*val >>= val2;
+				break;
+			default:
+				return 0;
+		}
+	}
+//	val1 = *val;
+	if (debug > 0)
+		printf(" %ld (HEX:0x%lX)\n",*val,*val);
+	return *val;
+}
+
+static struct builtin builtin_calc =
+{
+  "calc",
+  calc_func,
+  BUILTIN_MENU | BUILTIN_CMDLINE | BUILTIN_SCRIPT | BUILTIN_HELP_LIST,
+  "calc [*INTEGER=] [*]INTEGER OPERATOR [[*]INTEGER]",
+  "GRUB4DOS Simple Calculator.\n"
+  "Available Operators: + - * / % << >> ^ & |"
+  "\nNote: this is a Simple Calculator and From left to right only."
+};
+
 /* The table of builtin commands. Sorted in dictionary order.  */
 struct builtin *builtin_table[] =
 {
@@ -10951,6 +13497,7 @@ struct builtin *builtin_table[] =
   &builtin_bootp,
 #endif /* SUPPORT_NETBOOT */
 #endif /* ! GRUB_UTIL */
+  &builtin_calc,
   &builtin_cat,
 #if ! defined(GRUB_UTIL) && ! defined (STAGE1_5)
   &builtin_cdrom,
@@ -10963,8 +13510,12 @@ struct builtin *builtin_table[] =
   &builtin_clear,
   &builtin_cmp,
   &builtin_color,
+  &builtin_command,
   &builtin_commandline,
   &builtin_configfile,
+#ifndef GRUB_UTIL
+  &builtin_dd,
+#endif
   &builtin_debug,
   &builtin_default,
 #ifdef GRUB_UTIL
@@ -10977,8 +13528,8 @@ struct builtin *builtin_table[] =
   &builtin_displaymem,
 #ifdef GRUB_UTIL
   &builtin_dump,
-#endif /* GRUB_UTIL */
   &builtin_embed,
+#endif /* GRUB_UTIL */
   &builtin_errnum,
   &builtin_errorcheck,
   &builtin_fallback,
@@ -10988,6 +13539,9 @@ struct builtin *builtin_table[] =
 #endif
   &builtin_fstest,
   &builtin_geometry,
+#ifdef SUPPORT_GFX
+  &builtin_gfxmenu,
+#endif
   &builtin_halt,
   &builtin_help,
   &builtin_hiddenflag,
@@ -10998,7 +13552,9 @@ struct builtin *builtin_table[] =
 #endif /* SUPPORT_NETBOOT */
 //  &builtin_impsprobe,
   &builtin_initrd,
+#ifdef GRUB_UTIL
   &builtin_install,
+#endif /* GRUB_UTIL */
 //  &builtin_ioprobe,
   &builtin_is64bit,
   &builtin_kernel,
@@ -11043,7 +13599,9 @@ struct builtin *builtin_table[] =
   &builtin_serial,
 #endif /* SUPPORT_SERIAL */
   &builtin_setkey,
+#ifdef GRUB_UTIL
   &builtin_setup,
+#endif /* GRUB_UTIL */
   &builtin_setvbe,
 #ifdef SUPPORT_GRAPHICS
   &builtin_splashimage,
@@ -11066,6 +13624,7 @@ struct builtin *builtin_table[] =
 #endif /* ! defined(GRUB_UTIL) && ! defined (STAGE1_5) */
   &builtin_unhide,
 //  &builtin_uppermem,
+  &builtin_uuid,
   &builtin_vbeprobe,
 #ifndef GRUB_UTIL
   &builtin_write,

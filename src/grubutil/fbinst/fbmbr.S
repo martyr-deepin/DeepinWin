@@ -28,6 +28,7 @@
 #define KEY_ESCAPE	0x11b
 
 #define DATA_BUF_SEG	0x8000
+#define LIST_BUF_SEG	0x1000
 #define CODE_START	0x2000
 
 #define DOT_SIZE	1024		/* 512k  */
@@ -109,30 +110,39 @@ start_7c00:
 #endif
 
 	movw	$0x1, %cx
+	movw	%cx, %si
 	xorb	%dh, %dh
 	call	safe_int13		/* 0, 0, 1  */
 	call	check_mbr
 	movw	ABS(lba), %di		/* sector 0 offset  */
 
-	pushw	$((CODE_START + 0x200) >> 4)
-	popw	%es
-
 	/* detect lba mode  */
 	pushaw
+	pushw	$((CODE_START + 0x200) >> 4)
+
+	cmpb	$0x80, ABS(max_sec)
+	jae	1f
 
 	movb	$0x41, %ah
 	movw	$0x55aa, %bx
 	int	$0x13
-	jc	1f			/* No EBIOS */
-	cmpw	$0xaa55, %bx
-	jne	1f			/* No EBIOS */
+	jc	1f
+	subw	$0xaa55, %bx
+	jnz	1f
 	testb	$1, %cl
-	jz	1f			/* No EBIOS */
+	jz	1f
+
+	popw	%ax
+	movw	%ax, %es
+	call	lba_mode
 	popaw
 	decb	%dh
 	jmp	2f
-1:
 
+1:
+	popw	%es
+
+try_chs:
 	popaw
 
 	incb	%dh
@@ -149,10 +159,9 @@ start_7c00:
 	movb	%al, ABS(heads)
 
 2:
-
+	movb	$(err_int13 - jump_ofs), ABS(jump_patch)
 	movw	ABS(boot_base), %ax
-	incw	%ax
-	movw	ABS(boot_size), %si
+	incw	%ax			/* si = 1  */
 	call	read_sectors
 	ljmp	$0, $ABS(start_2000)
 
@@ -168,100 +177,37 @@ calc_lba:
 
 check_mbr:
 	cmpw	$FB_MAGIC_WORD, %es: (OFS_fb_magic)
-	jnz	1f
+	jnz	halt
 	ret
-1:
-	movb	$'m', %al
-	jmp	early_fail
 
-test_int13:
-
+read_int13_fail:
 	pushaw
-	stc
+	xorw	%ax, %ax
 	int	$0x13
-	sti
 	popaw
 
-#ifdef DEBUG_INT13
-	pushfw
-	pushaw
-
-	pushaw
-	pushfw
-	pushw	%es
-
-	shlw	$9, %ax
-	addw	%ax, %bx
-	movw	$5, %cx
+	cmpb	$7, %al
+	jbe	1f
+	movb	$7, %al
+	jmp	2f
 
 1:
-	decw	%bx
-	decw	%bx
-	pushw	%es: (%bx)
-	loop	1b
+	cmpb	$1, %al
+	/* jbe	err_int13  */
+	.byte	0x76
+jump_patch:
+	.byte	try_chs - jump_ofs
+jump_ofs:
+	movb	$1, %al
 
-	pushw	%es: (OFS_lba)
-
-	movb	$16, %cl
-1:
-	call	dump_hex
-	loop	1b
-
-	popaw
-	popfw
-#endif
-
-	ret
-
-safe_int13:
-	call	test_int13
-	jc	err_int13
-	ret
-
-err_int13:
-	movb	$'i', %al
-
-early_fail:
-	movb	$0xe, %ah
-	xorw	%bx, %bx
-	int	$0x10
-
-halt:
-	hlt
-	jmp	halt
-
-#ifdef DEBUG
-
-/*
- * input:
- *   18(%bp) - word
- */
-dump_hex:
-	pushaw
-	movw	%sp, %bp
-
-	movb	$0xe, %ah
-	xorw	%bx, %bx
-	movw	$4, %cx
-	movw	18(%bp), %dx
-1:
-	rol	$4, %dx
-	movb	%dl, %al
-	andb	$0xF, %al
-	cmpb	$10, %al
-	jb	2f
-	subb	$('0'-'A'+10), %al
 2:
-	addb	$'0', %al
-	int	$0x10
-	loop	1b
-	movb	$' ', %al
-	int	$0x10
+	cmpb	$0xff, %dh
+	jnz	2f
+	movb	%al, 2(%si)
+2:
 
-	popaw
-	ret	$2
-
-#endif
+	movb	%al, ABS(max_sec)
+	jmp	read_int13
 
 /*
  * input:
@@ -314,6 +260,11 @@ lba_mode_cont:
 	popw	%si
 	ret
 
+err_int13:
+halt:
+	hlt
+	jmp	halt
+
 chs_mode:
 	/* ch = cylinder, cl = sector, dh = head, dl = drive  */
 	/* ax = current count, si = total count  */
@@ -358,34 +309,86 @@ chs_mode_cont:
 
 read_int13:
 	call	test_int13
-	jc	1f
+	jc	read_int13_fail
 	xorb	%ah, %ah
 	ret
 
-1:
-	cmpb	$7, %al
-	jbe	1f
-	movb	$7, %al
-	jmp	2f
+test_int13:
 
-1:
-	cmpb	$1, %al
-	jbe	err_int13
-	movb	$1, %al
-
-2:
-
-	cmpb	$0xff, %dh
-	jnz	2f
-	movb	%al, 2(%si)
-2:
-
-	movb	%al, ABS(max_sec)
 	pushaw
-	xorw	%ax, %ax
+	stc
 	int	$0x13
+	sti
+
+#ifdef DEBUG_INT13
+	pushfw
+
+	/*  ES  FG  DI  SI  BP  SP  BX  DX  CX  AX  */
+	pushaw
+	pushfw
+	pushw	%es
+
+	shlw	$9, %ax
+	addw	%ax, %bx
+	movw	$5, %cx
+
+1:
+	decw	%bx
+	decw	%bx
+	pushw	%es: (%bx)
+	loop	1b
+
+	pushw	%es: (OFS_lba)
+
+	movb	$16, %cl
+1:
+	call	dump_hex
+	loop	1b
+
+	popfw
+#endif
+
 	popaw
-	jmp	read_int13
+	ret
+
+safe_int13:
+	call	test_int13
+	jc	err_int13
+	ret
+
+
+#ifdef DEBUG
+
+/*
+ * input:
+ *   18(%bp) - word
+ */
+dump_hex:
+	pushaw
+	movw	%sp, %bp
+
+	movb	$0xe, %ah
+	xorw	%bx, %bx
+	movw	$4, %cx
+	movw	18(%bp), %dx
+1:
+	rol	$4, %dx
+	movb	%dl, %al
+	andb	$0xF, %al
+	cmpb	$10, %al
+	jb	2f
+	subb	$('0'-'A'+10), %al
+2:
+	addb	$'0', %al
+	int	$0x10
+	loop	1b
+	movb	$' ', %al
+	int	$0x10
+
+	popaw
+	ret	$2
+
+#endif
 
 VARIABLE(max_sec)
 	.byte	63
@@ -405,9 +408,6 @@ VARIABLE(heads)
 VARIABLE(boot_base)
 	.word	0
 
-VARIABLE(boot_size)
-	.word	0
-
 VARIABLE(fb_magic)
 	.ascii	FB_MAGIC
 
@@ -415,8 +415,8 @@ VARIABLE(fb_magic)
 
 	.word	0xaa55
 
-VARIABLE(menu_ofs)
-	.word	start_menu - start - 0x200
+VARIABLE(boot_size)
+	.word	0
 
 VARIABLE(flags)
 	.word	0
@@ -427,11 +427,18 @@ VARIABLE(ver_major)
 VARIABLE(ver_minor)
 	.byte	VER_MINOR
 
+VARIABLE(list_used)
+	.word	0
+
+VARIABLE(list_size)
+	.word	0
+
 VARIABLE(pri_size)
-	.long	0
+	.word	0
 
 VARIABLE(ext_size)
 	.long	0
+
 
 read_sectors_cont_1:
 	pushw	%ax
@@ -492,7 +499,7 @@ print_string:
 	cld
 	pushaw
 	movw	$1, %cx
-	movw	text_color, %bx
+	movw	%cs:text_color, %bx
 
 1:
 	lodsb	(%si), %al
@@ -563,81 +570,60 @@ copy_sectors:
 
 /*
  * input:
- *   %cl - type
- * output:
- *   cf clear if found
- *   %si - current item
- */
-
-find_first_item:
-	movw	%bp, %si
-	jmp	find_item_start
-
-find_next_item:
-	movb	-2(%si), %al
-1:
-	xorb	%ah, %ah
-	addw	%ax, %si
-
-find_item_start:
-	cld
-	lodsw
-	cmpb	%ah, %cl
-	jz	1f
-	orb	%al, %al
-	jnz	1b
-	stc
-1:
-	ret
-
-/*
- * input:
  *   %si - file name
  * output:
- *   %si - current item
+ *   %es:%si - current item
  *   %ax - number of sectors
- *   block_size (512/510)
+ *   %cx - block_size (512/510)
  */
-find_file:
+check_file:
 	movw	%si, file_name
-	movw	$ABS(start_menu), %si
-	movb	$FBM_TYPE_FILE, %cl
-	call	find_item_start
+	pushw	$LIST_BUF_SEG
+	popw	%ds
+	xorw	%si, %si
 
 1:
-	jnc	2f
-	movw	$ABS(err_no_file), %si
-	jmp	fail
+	lodsw
+	orb	%al, %al
+	jnz	2f
+
+	pushw	%cs
+	popw	%ds
+	stc
+	ret
 
 2:
-
-	pushw	%si
-	addw	$13, %si
-	movw	file_name, %bx
+	push	%si
+	addw	$12, %si
+	movw	%cs:file_name, %bx
 
 2:
 	lodsb
-	cmpb	(%bx), %al
+	movb	%al, %ah
+	xorb	%cs: (%bx), %al
+	jz	3f
+	cmpb	$0x20, %al
 	jnz	2f
+3:
 	incw	%bx
-	orb	%al, %al
+	orb	%ah, %ah
 	jnz	2b
-
-	movw	%bx, file_name
+	movw	%bx, %cs:file_name
 
 2:
 	popw	%si
 	jz	1f
-	call	find_next_item
+	movb	-2(%si), %al
+	xorb	%ah, %ah
+	addw	%ax, %si
+	call	normalize_dssi
 	jmp	1b
 
 1:
-
-	movw	2(%si), %ax
-	cmpw	ABS(pri_size + 2), %ax
+	cmpw	$0, 2(%si)
 	jnz	1f
 	movw	(%si), %ax
-	cmpw	ABS(pri_size), %ax
+	cmpw	%cs:ABS(pri_size), %ax
 1:
 
 	movw	$512, %cx
@@ -657,19 +643,38 @@ find_file:
 1:
 
 	popw	%dx
+
+	pushw	%ds
+	pushw	%cs
+	popw	%ds
 	movw	%cx, block_size
 
 	movw	dot_max, %bx
 	orw	%bx, %bx
 	jz	1f
+
 	movw	%bx, dot_cur
 	movw	%si, %bx
 	movw	$ABS(loading_message), %si
 	call	print_string
-	leaw	13(%bx), %si
+	leaw	12(%bx), %si
+	popw	%ds
+	pushw	%ds
 	call	print_string
+	pushw	%cs
+	popw	%ds
 	movw	%bx, %si
 
+1:
+	popw	%es
+	clc
+	ret
+
+find_file:
+	call	check_file
+	jnc	1f
+	movw	$ABS(err_no_file), %si
+	jmp	fail
 1:
 	ret
 
@@ -685,21 +690,22 @@ load_file:
 /*
  * input:
  *   gdt_dst - target address
- *   %si - current item
+ *   %es:%si - current item
  *   %ax - number of sectors
  *   block_size (512/510)
  */
 load_data:
+	pushw	%es
 	pushw	%bp
+
+	pushw	%ax
+	movw	%es: (%si), %ax
+	movw	%es: 2(%si), %bp
+	popw	%si
 
 	xorw	%bx, %bx
 	pushw	$DATA_BUF_SEG
 	popw	%es
-
-	pushw	%ax
-	movw	(%si), %ax
-	movw	2(%si), %bp
-	popw	%si
 
 	call	read_sectors
 
@@ -731,9 +737,12 @@ load_data:
 	jnz	1b
 
 	popw	%bp
+	popw	%es
 	ret
 
 start_2000:
+	movw	ABS(boot_size), %si
+	andb	$0x7f, ABS(max_sec)
 	pushw	%si
 
 1:
@@ -767,34 +776,82 @@ start_2000:
 	movb	%al, gdt_src_acc
 	movb	%al, gdt_dst_acc
 
-	movw	ABS(menu_ofs), %cx
-	shrw	$9, %cx
-	incw	%cx
 	popw	%ax				/*  ax = boot_size  */
-	subw	%cx, %ax
-	jz	1f
-	shlw	$9, %cx
-	addw	$(CODE_START + 0x200), %cx
-	movw	%cx, gdt_src_low
-	decw	%cx
-	decw	%cx
-	movw	%cx, gdt_dst_low
+	pushw	%ax
+	decw	%ax
+	movw	$(CODE_START + 0x400), gdt_src_low
+	movw	$(CODE_START + 0x400 - 2), gdt_dst_low
 	movw	$510, block_size
 	call	copy_sectors
-1:
+
+	popw	%ax
 
 	popw	orig_di
 	popw	orig_es
 
-	movb	$(DATA_BUF_SEG >> 12), gdt_src_hi1
-	movw	$ABS(menu_file), %si
-	movw	%bp, gdt_dst_low
-	call	load_file
+	jmp	1f
 
-	jmp	parse_menu
-
+	/* make sure it doesn't overflown */
 	. = start + 0x400 - 2
-	.word	0
+
+1:
+	addw	ABS(boot_base), %ax
+	incw	%ax
+	xorw	%si, %si
+	pushw	$LIST_BUF_SEG
+	popw	%es
+	movw	%ax, %es: (%si)
+	movw	%si, %es: 2(%si)
+	movw	%si, gdt_dst_low
+
+	addb	$(LIST_BUF_SEG >> 12), gdt_dst_hi1
+	movw	%si, gdt_dst_low
+	movb	$(DATA_BUF_SEG >> 12), gdt_src_hi1
+	movw	ABS(list_used), %ax
+	call	load_data
+
+	movw	%bp, gdt_dst_low
+	movb	$0, gdt_dst_hi1
+
+	movw	$ABS(menu_file), %si
+	pushw	%si
+	call	check_file
+	popw	%si
+	jc	1f
+	call	load_file
+	jmp	parse_menu
+1:
+	call	clear_dest
+	movw	$ABS(default_loader), %si
+	jmp	boot_grldr
+/*
+ * input:
+ *   %cl - type
+ * output:
+ *   cf clear if found
+ *   %si - current item
+ */
+
+find_first_item:
+	movw	%bp, %si
+	jmp	find_item_start
+
+find_next_item:
+	movb	-2(%si), %al
+1:
+	xorb	%ah, %ah
+	addw	%ax, %si
+
+find_item_start:
+	cld
+	lodsw
+	cmpb	%ah, %cl
+	jz	1f
+	orb	%al, %al
+	jnz	1b
+	stc
+1:
+	ret
 
 /*
  * output:
@@ -999,8 +1056,8 @@ boot_syslinux:
 	movw	$0x7c00, gdt_dst_low
 	call	load_file
 	call	copy_bs
-	movb	ABS(max_sec), %al
-	movb	%al, (0x7dfc)		/* MaxTransfer  */
+	//movb	ABS(max_sec), %al
+	//movb	%al, (0x7dfc)		/* MaxTransfer  */
 	call	setup_mbr
 	ljmp	$0, $0x7c00
 
@@ -1016,8 +1073,10 @@ boot_linux:
 	movw	$1, %ax
 	call	load_data_inc
 	movw	$0x9000, %bx
+	pushw	%es
 	movw	%bx, %es
 	movb	%es: (0x1f1), %al
+	popw	%es
 	incw	%ax
 	shlw	$9, %ax
 	movw	%ax, %cx
@@ -1066,32 +1125,34 @@ boot_linux:
 
 	call	print_newline
 
-	movw	%bx, %es
 	movw	file_name, %si
 	cmpb	$0, (%si)
 	jz	1f
 	call	clear_dest
-	incb	gdt_dst_hi2			/* initrd at 16m  */
+	movb	$2, gdt_dst_hi2			/* initrd at 32m  */
 	pushw	%bx
 	call	find_file
-
-	incb	%es: (0x218 + 3)		/* ramdisk_image  */
-	movw	4(%si), %cx
-	movw	%cx, %es: (0x21c)		/* ramdisk_size  */
-	movw	6(%si), %cx
-	movw	%cx, %es: (0x21c + 2)		/* ramdisk_size  */
-
+	popw	%bx
+	pushw	%bx
+	pushw	%es
+	pushw	%es: 6(%si)
+	pushw	%es: 4(%si)
+	movw	%bx, %es
+	movb	$2, %es: (0x218 + 3)		/* ramdisk_image  */
+	popw	%es: (0x21c)			/* ramdisk_size  */
+	popw	%es: (0x21c + 2)		/* ramdisk_size  */
+	popw	%es
 	call	load_data
 	call	print_newline
 
 	popw	%bx
-	movw	%bx, %es
 
 	movw	file_name, %si
 	decw	%si
 1:
 	incw	%si
 
+	movw	%bx, %es
 	movw	%bx, %es: (0x228)		/* cmd_line_ptr  */
 	cld
 
@@ -1119,9 +1180,6 @@ boot_linux:
 
 	ljmp	$0x9020, $0
 
-	. = start + 0x600 - 2
-	.word	0
-
 print_newline:
 	movw	$ABS(newline), %si
 	call	print_string
@@ -1138,14 +1196,15 @@ load_data_inc:
 	pushaw
 	call	load_data
 	popaw
-	addw	%ax, (%si)
-	adcw	$0, 2(%si)
+	addw	%ax, %es:(%si)
+	adcw	$0, %es:2(%si)
 	ret
 
 10:
 	cmpb	$FBS_TYPE_MSDOS, %al
 	jnz	10f
 
+boot_msdos:
 	call	find_file
 	movw	$(DATA_BUF_SEG >> 5), %bx
 	subw	%ax, %bx
@@ -1171,6 +1230,53 @@ load_data_inc:
 	rep	movsb
 
 	ljmp	$DATA_BUF_SEG, $0x200
+
+10:
+	cmpb	$FBS_TYPE_FREEDOS, %al
+	jnz	10f
+
+boot_freedos:
+	//incb	gdt_dst_hi1
+	movb	$2, gdt_dst_hi1
+	call	load_file
+
+	movw	$ABS(freedos_trampoline_start), %si
+	movw	$(freedos_trampoline_end - freedos_trampoline_start), %cx
+	xorw	%di, %di
+	pushw	$DATA_BUF_SEG
+	popw	%es
+	rep	movsb
+	ljmp	$DATA_BUF_SEG, $0
+
+freedos_trampoline_start:
+	pushw	$0x2000
+	popw	%ds
+	pushw	$0x60
+	popw	%es
+	xorw	%si, %si
+	movw	%si, %di
+	movw	$0x8000, %cx
+	rep	movsw
+	xorb	%dh, %dh
+	movw	%dx, %bx
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	movw	%ax, %es
+	movw	%ax, %ss
+	movw	$0x400, %sp
+	ljmp	$0x60, $0
+
+freedos_trampoline_end:
+
+10:
+	cmpb	$FBS_TYPE_CHAIN, %al
+	jnz	10f
+
+boot_chain:
+	movw	$0x7c00, gdt_dst_low
+	call	load_file
+	call	setup_mbr
+	ljmp	$0, $0x7c00
 
 10:
 	movw	$ABS(err_no_type), %si
@@ -1304,19 +1410,20 @@ iosys_expand_error:
 	jmp	iosys_expand_error
 
 normalize_address:
-	movw	%si, %ax
-	andw	$0xf, %si
-	shrw	$4, %ax
-	movw	%ds, %cx
-	addw	%cx, %ax
-	movw	%ax, %ds
-
 	movw	%di, %ax
 	andw	$0xf, %di
 	shrw	$4, %ax
 	movw	%es, %cx
 	addw	%cx, %ax
 	movw	%ax, %es
+
+normalize_dssi:
+	movw	%si, %ax
+	andw	$0xf, %si
+	shrw	$4, %ax
+	movw	%ds, %cx
+	addw	%cx, %ax
+	movw	%ax, %ds
 	ret
 
 iosys_trampoline_end:
@@ -1427,6 +1534,9 @@ dump_mem:
 menu_file:
 	.ascii	FB_MENU_FILE "\0"
 
+default_loader:
+	.ascii	"buldr\0"
+
 err_int15:
 	.ascii	"int15\0"
 
@@ -1448,4 +1558,4 @@ dot_message:
 newline:
 	.ascii	"\r\n\0"
 
-start_menu:
+code_end:

@@ -111,10 +111,10 @@ am_libgrub_a_OBJECTS = libgrub_a-boot.$(OBJEXT) \
 	libgrub_a-fsys_reiserfs.$(OBJEXT) \
 	libgrub_a-fsys_ufs2.$(OBJEXT) libgrub_a-fsys_vstafs.$(OBJEXT) \
 	libgrub_a-fsys_xfs.$(OBJEXT) libgrub_a-fsys_pxe.$(OBJEXT) \
-	libgrub_a-gunzip.$(OBJEXT) libgrub_a-md5.$(OBJEXT) \
-	libgrub_a-serial.$(OBJEXT) libgrub_a-stage2.$(OBJEXT) \
-	libgrub_a-terminfo.$(OBJEXT) libgrub_a-tparm.$(OBJEXT) \
-	libgrub_a-graphics.$(OBJEXT)
+	libgrub_a-fsys_fb.$(OBJEXT) libgrub_a-gunzip.$(OBJEXT) \
+	libgrub_a-md5.$(OBJEXT) libgrub_a-serial.$(OBJEXT) \
+	libgrub_a-stage2.$(OBJEXT) libgrub_a-terminfo.$(OBJEXT) \
+	libgrub_a-tparm.$(OBJEXT) libgrub_a-graphics.$(OBJEXT)
 libgrub_a_OBJECTS = $(am_libgrub_a_OBJECTS)
 PROGRAMS = $(noinst_PROGRAMS)
 am_badgrubstart_exec_OBJECTS =  \
@@ -144,7 +144,7 @@ am__objects_1 = diskless_exec-asm.$(OBJEXT) \
 	diskless_exec-fsys_vstafs.$(OBJEXT) \
 	diskless_exec-fsys_xfs.$(OBJEXT) \
 	diskless_exec-fsys_pxe.$(OBJEXT) \
-	diskless_exec-gunzip.$(OBJEXT) \
+	diskless_exec-fsys_fb.$(OBJEXT) diskless_exec-gunzip.$(OBJEXT) \
 	diskless_exec-hercules.$(OBJEXT) diskless_exec-md5.$(OBJEXT) \
 	diskless_exec-serial.$(OBJEXT) \
 	diskless_exec-smp-imps.$(OBJEXT) \
@@ -260,6 +260,7 @@ am_pre_stage2_exec_OBJECTS = pre_stage2_exec-asm.$(OBJEXT) \
 	pre_stage2_exec-fsys_vstafs.$(OBJEXT) \
 	pre_stage2_exec-fsys_xfs.$(OBJEXT) \
 	pre_stage2_exec-fsys_pxe.$(OBJEXT) \
+	pre_stage2_exec-fsys_fb.$(OBJEXT) \
 	pre_stage2_exec-gunzip.$(OBJEXT) \
 	pre_stage2_exec-hercules.$(OBJEXT) \
 	pre_stage2_exec-md5.$(OBJEXT) pre_stage2_exec-serial.$(OBJEXT) \
@@ -381,6 +382,7 @@ AUTOHEADER = @AUTOHEADER@
 AUTOMAKE = @AUTOMAKE@
 AWK = @AWK@
 BIN_LDFLAGS = @BIN_LDFLAGS@
+BUILD_DIRS = @BUILD_DIRS@
 BUILD_EXAMPLE_KERNEL_FALSE = @BUILD_EXAMPLE_KERNEL_FALSE@
 BUILD_EXAMPLE_KERNEL_TRUE = @BUILD_EXAMPLE_KERNEL_TRUE@
 CC = @CC@
@@ -401,8 +403,11 @@ ECHO_T = @ECHO_T@
 EGREP = @EGREP@
 EXEEXT = @EXEEXT@
 FSYS_CFLAGS = @FSYS_CFLAGS@
+GFX_SUPPORT_FALSE = @GFX_SUPPORT_FALSE@
+GFX_SUPPORT_TRUE = @GFX_SUPPORT_TRUE@
 GRAPHICS_SUPPORT_FALSE = @GRAPHICS_SUPPORT_FALSE@
 GRAPHICS_SUPPORT_TRUE = @GRAPHICS_SUPPORT_TRUE@
+GREP = @GREP@
 GRUB_CFLAGS = @GRUB_CFLAGS@
 GRUB_LIBS = @GRUB_LIBS@
 HERCULES_SUPPORT_FALSE = @HERCULES_SUPPORT_FALSE@
@@ -446,9 +451,6 @@ STAGE2_CFLAGS = @STAGE2_CFLAGS@
 STRIP = @STRIP@
 VERSION = @VERSION@
 ac_ct_CC = @ac_ct_CC@
-ac_ct_OBJCOPY = @ac_ct_OBJCOPY@
-ac_ct_RANLIB = @ac_ct_RANLIB@
-ac_ct_STRIP = @ac_ct_STRIP@
 am__fastdepCC_FALSE = @am__fastdepCC_FALSE@
 am__fastdepCC_TRUE = @am__fastdepCC_TRUE@
 am__include = @am__include@
@@ -463,23 +465,30 @@ build_cpu = @build_cpu@
 build_os = @build_os@
 build_vendor = @build_vendor@
 datadir = @datadir@
+datarootdir = @datarootdir@
+docdir = @docdir@
+dvidir = @dvidir@
 exec_prefix = @exec_prefix@
 host = @host@
 host_alias = @host_alias@
 host_cpu = @host_cpu@
 host_os = @host_os@
 host_vendor = @host_vendor@
+htmldir = @htmldir@
 includedir = @includedir@
 infodir = @infodir@
 install_sh = @install_sh@
 libdir = @libdir@
 libexecdir = @libexecdir@
+localedir = @localedir@
 localstatedir = @localstatedir@
 mandir = @mandir@
 mkdir_p = @mkdir_p@
 oldincludedir = @oldincludedir@
+pdfdir = @pdfdir@
 prefix = @prefix@
 program_transform_name = @program_transform_name@
+psdir = @psdir@
 sbindir = @sbindir@
 sharedstatedir = @sharedstatedir@
 sysconfdir = @sysconfdir@
@@ -506,8 +515,8 @@ noinst_LIBRARIES = libgrub.a
 libgrub_a_SOURCES = boot.c builtins.c char_io.c cmdline.c common.c \
 	disk_io.c fsys_ext2fs.c fsys_fat.c fsys_ntfs.c fsys_ffs.c fsys_iso9660.c \
 	fsys_jfs.c fsys_minix.c fsys_reiserfs.c fsys_ufs2.c \
-	fsys_vstafs.c fsys_xfs.c fsys_pxe.c gunzip.c md5.c serial.c stage2.c \
-	terminfo.c tparm.c graphics.c
+	fsys_vstafs.c fsys_xfs.c fsys_pxe.c fsys_fb.c gunzip.c md5.c serial.c \
+	stage2.c terminfo.c tparm.c graphics.c
 
 libgrub_a_CFLAGS = $(GRUB_CFLAGS) -I$(top_srcdir)/lib \
 	-DGRUB_UTIL=1 -DFSYS_EXT2FS=1 -DFSYS_FAT=1 -DFSYS_NTFS=1 -DFSYS_FFS=1 \
@@ -540,8 +549,11 @@ START_ELTORITO_LINK = -nostdlib -Wl,-N -Wl,-Ttext -Wl,7C00 $(BIN_LDFLAGS)
 @HERCULES_SUPPORT_TRUE@HERCULES_FLAGS = -DSUPPORT_HERCULES=1
 @GRAPHICS_SUPPORT_FALSE@GRAPHICS_FLAGS = 
 @GRAPHICS_SUPPORT_TRUE@GRAPHICS_FLAGS = -DSUPPORT_GRAPHICS=1
+@GFX_SUPPORT_FALSE@GFX_FLAGS = 
+@GFX_SUPPORT_TRUE@GFX_FLAGS = -DSUPPORT_GFX=1
 STAGE2_COMPILE = $(STAGE2_CFLAGS) -fno-builtin -nostdinc \
-	$(NETBOOT_FLAGS) $(SERIAL_FLAGS) $(HERCULES_FLAGS) $(GRAPHICS_FLAGS)
+	$(NETBOOT_FLAGS) $(SERIAL_FLAGS) $(HERCULES_FLAGS) $(GRAPHICS_FLAGS) \
+	$(GFX_FLAGS)
 
 STAGE1_5_LINK = -nostdlib -Wl,-N -Wl,-Ttext -Wl,2000 $(BIN_LDFLAGS)
 STAGE1_5_COMPILE = $(STAGE2_COMPILE) -DNO_DECOMPRESSION=1 -DSTAGE1_5=1
@@ -550,7 +562,7 @@ STAGE1_5_COMPILE = $(STAGE2_COMPILE) -DNO_DECOMPRESSION=1 -DSTAGE1_5=1
 pre_stage2_exec_SOURCES = asm.S bios.c boot.c builtins.c char_io.c \
 	cmdline.c common.c console.c disk_io.c fsys_ext2fs.c \
 	fsys_fat.c fsys_ntfs.c fsys_ffs.c fsys_iso9660.c fsys_jfs.c fsys_minix.c \
-	fsys_reiserfs.c fsys_ufs2.c fsys_vstafs.c fsys_xfs.c fsys_pxe.c gunzip.c \
+	fsys_reiserfs.c fsys_ufs2.c fsys_vstafs.c fsys_xfs.c fsys_pxe.c fsys_fb.c gunzip.c \
 	hercules.c md5.c serial.c smp-imps.c stage2.c terminfo.c tparm.c graphics.c
 
 pre_stage2_exec_CFLAGS = $(STAGE2_COMPILE) $(FSYS_CFLAGS)
@@ -870,6 +882,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-disk_io.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_ext2fs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_fat.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_fb.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_ffs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_iso9660.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/diskless_exec-fsys_jfs.Po@am__quote@
@@ -927,6 +940,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-disk_io.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_ext2fs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_fat.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_fb.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_ffs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_iso9660.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libgrub_a-fsys_jfs.Po@am__quote@
@@ -966,6 +980,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-disk_io.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_ext2fs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_fat.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_fb.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_ffs.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_iso9660.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/pre_stage2_exec-fsys_jfs.Po@am__quote@
@@ -1486,6 +1501,20 @@ libgrub_a-fsys_pxe.obj: fsys_pxe.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -c -o libgrub_a-fsys_pxe.obj `if test -f 'fsys_pxe.c'; then $(CYGPATH_W) 'fsys_pxe.c'; else $(CYGPATH_W) '$(srcdir)/fsys_pxe.c'; fi`
 
+libgrub_a-fsys_fb.o: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -MT libgrub_a-fsys_fb.o -MD -MP -MF "$(DEPDIR)/libgrub_a-fsys_fb.Tpo" -c -o libgrub_a-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/libgrub_a-fsys_fb.Tpo" "$(DEPDIR)/libgrub_a-fsys_fb.Po"; else rm -f "$(DEPDIR)/libgrub_a-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='libgrub_a-fsys_fb.o' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -c -o libgrub_a-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c
+
+libgrub_a-fsys_fb.obj: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -MT libgrub_a-fsys_fb.obj -MD -MP -MF "$(DEPDIR)/libgrub_a-fsys_fb.Tpo" -c -o libgrub_a-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/libgrub_a-fsys_fb.Tpo" "$(DEPDIR)/libgrub_a-fsys_fb.Po"; else rm -f "$(DEPDIR)/libgrub_a-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='libgrub_a-fsys_fb.obj' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -c -o libgrub_a-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`
+
 libgrub_a-gunzip.o: gunzip.c
 @am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libgrub_a_CFLAGS) $(CFLAGS) -MT libgrub_a-gunzip.o -MD -MP -MF "$(DEPDIR)/libgrub_a-gunzip.Tpo" -c -o libgrub_a-gunzip.o `test -f 'gunzip.c' || echo '$(srcdir)/'`gunzip.c; \
 @am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/libgrub_a-gunzip.Tpo" "$(DEPDIR)/libgrub_a-gunzip.Po"; else rm -f "$(DEPDIR)/libgrub_a-gunzip.Tpo"; exit 1; fi
@@ -1863,6 +1892,20 @@ diskless_exec-fsys_pxe.obj: fsys_pxe.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_pxe.c' object='diskless_exec-fsys_pxe.obj' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -c -o diskless_exec-fsys_pxe.obj `if test -f 'fsys_pxe.c'; then $(CYGPATH_W) 'fsys_pxe.c'; else $(CYGPATH_W) '$(srcdir)/fsys_pxe.c'; fi`
+
+diskless_exec-fsys_fb.o: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -MT diskless_exec-fsys_fb.o -MD -MP -MF "$(DEPDIR)/diskless_exec-fsys_fb.Tpo" -c -o diskless_exec-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/diskless_exec-fsys_fb.Tpo" "$(DEPDIR)/diskless_exec-fsys_fb.Po"; else rm -f "$(DEPDIR)/diskless_exec-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='diskless_exec-fsys_fb.o' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -c -o diskless_exec-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c
+
+diskless_exec-fsys_fb.obj: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -MT diskless_exec-fsys_fb.obj -MD -MP -MF "$(DEPDIR)/diskless_exec-fsys_fb.Tpo" -c -o diskless_exec-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/diskless_exec-fsys_fb.Tpo" "$(DEPDIR)/diskless_exec-fsys_fb.Po"; else rm -f "$(DEPDIR)/diskless_exec-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='diskless_exec-fsys_fb.obj' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -c -o diskless_exec-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`
 
 diskless_exec-gunzip.o: gunzip.c
 @am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(diskless_exec_CFLAGS) $(CFLAGS) -MT diskless_exec-gunzip.o -MD -MP -MF "$(DEPDIR)/diskless_exec-gunzip.Tpo" -c -o diskless_exec-gunzip.o `test -f 'gunzip.c' || echo '$(srcdir)/'`gunzip.c; \
@@ -2858,6 +2901,20 @@ pre_stage2_exec-fsys_pxe.obj: fsys_pxe.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -c -o pre_stage2_exec-fsys_pxe.obj `if test -f 'fsys_pxe.c'; then $(CYGPATH_W) 'fsys_pxe.c'; else $(CYGPATH_W) '$(srcdir)/fsys_pxe.c'; fi`
 
+pre_stage2_exec-fsys_fb.o: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -MT pre_stage2_exec-fsys_fb.o -MD -MP -MF "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo" -c -o pre_stage2_exec-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo" "$(DEPDIR)/pre_stage2_exec-fsys_fb.Po"; else rm -f "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='pre_stage2_exec-fsys_fb.o' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -c -o pre_stage2_exec-fsys_fb.o `test -f 'fsys_fb.c' || echo '$(srcdir)/'`fsys_fb.c
+
+pre_stage2_exec-fsys_fb.obj: fsys_fb.c
+@am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -MT pre_stage2_exec-fsys_fb.obj -MD -MP -MF "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo" -c -o pre_stage2_exec-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`; \
+@am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo" "$(DEPDIR)/pre_stage2_exec-fsys_fb.Po"; else rm -f "$(DEPDIR)/pre_stage2_exec-fsys_fb.Tpo"; exit 1; fi
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='fsys_fb.c' object='pre_stage2_exec-fsys_fb.obj' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -c -o pre_stage2_exec-fsys_fb.obj `if test -f 'fsys_fb.c'; then $(CYGPATH_W) 'fsys_fb.c'; else $(CYGPATH_W) '$(srcdir)/fsys_fb.c'; fi`
+
 pre_stage2_exec-gunzip.o: gunzip.c
 @am__fastdepCC_TRUE@	if $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(pre_stage2_exec_CFLAGS) $(CFLAGS) -MT pre_stage2_exec-gunzip.o -MD -MP -MF "$(DEPDIR)/pre_stage2_exec-gunzip.Tpo" -c -o pre_stage2_exec-gunzip.o `test -f 'gunzip.c' || echo '$(srcdir)/'`gunzip.c; \
 @am__fastdepCC_TRUE@	then mv -f "$(DEPDIR)/pre_stage2_exec-gunzip.Tpo" "$(DEPDIR)/pre_stage2_exec-gunzip.Po"; else rm -f "$(DEPDIR)/pre_stage2_exec-gunzip.Tpo"; exit 1; fi
@@ -3619,7 +3676,7 @@ grub.exe: pre_stage2 dosstart
 	-rm -f grub.exe
 	echo -n -e "\000\000\000\000\000\000\000\000\000\000\000\000" | cat dosstart pre_stage2 - > grub.exe
 	if [ -f ../preset_menu_used ]; then cat ../preset_menu_used >> grub.exe ;fi
-	dd if=/dev/zero bs=1 count=4128 >> grub.exe
+	dd if=/dev/zero bs=4128 count=1 >> grub.exe
 
 badgrubstart_exec-badgrubstart.$(OBJEXT): stage2_size.h edd.S video.S \
 	linux/autoconf.h linux/compile.h linux/config.h linux/edd.h \
@@ -3630,7 +3687,7 @@ badgrub.exe: pre_stage2 badgrubstart
 	-rm -f badgrub.exe
 	echo -n -e "\000\000\000\000\000\000\000\000\000\000\000\000" | cat badgrubstart pre_stage2 - > badgrub.exe
 	if [ -f ../preset_menu_used ]; then cat ../preset_menu_used >> badgrub.exe ;fi
-	dd if=/dev/zero bs=1 count=4128 >> badgrub.exe
+	dd if=/dev/zero bs=4128 count=1 >> badgrub.exe
 
 grldrstart_exec-grldrstart.$(OBJEXT): stage2_size.h
 
@@ -3688,6 +3745,9 @@ pxegrub: pxeloader diskless
 	cat $^ > $@
 %: %.exec$(EXEEXT)
 	$(OBJCOPY) -O binary $< $@
+	if [ $@ = pre_stage2 ]; then dd if=pre_stage2 of=pre_stage2_fullsize bs=65536 skip=48 ;fi
+	if [ $@ = pre_stage2 ]; then sed -e "1s/^\x00*//" pre_stage2_fullsize > pre_stage2_tail ;fi
+	if [ $@ = pre_stage2 ]; then set dummy `ls -l pre_stage2_fullsize`; set $$6 `ls -l pre_stage2_tail`; dd if=pre_stage2 of=pre_stage2_head bs=`expr $$1 - $$6` count=1 ; cat pre_stage2_head pre_stage2_tail > pre_stage2 ;fi
 	if [ $@ = pre_stage2 ]; then echo -n -e "\0260\002\032\0316" >> $@ ;fi
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

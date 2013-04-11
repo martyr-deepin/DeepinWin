@@ -56,8 +56,13 @@ extern char *grub_scratch_mem;
 #define NEW_HEAPSIZE 1500
 
 /* 512-byte scratch area */
+#ifdef GRUB_UTIL
 #define SCRATCHADDR  RAW_ADDR (0x77e00)
 #define SCRATCHSEG   RAW_SEG (0x77e0)
+#else
+#define SCRATCHADDR  RAW_ADDR (0x37e00)
+#define SCRATCHSEG   RAW_SEG (0x37e0)
+#endif
 
 /*
  *  This is the location of the raw device buffer.  It is 31.5K
@@ -65,8 +70,13 @@ extern char *grub_scratch_mem;
  */
 
 #define BUFFERLEN   0x7e00
+#ifdef GRUB_UTIL
 #define BUFFERADDR  RAW_ADDR (0x70000)
 #define BUFFERSEG   RAW_SEG (0x7000)
+#else
+#define BUFFERADDR  RAW_ADDR (0x30000)
+#define BUFFERSEG   RAW_SEG (0x3000)
+#endif
 
 #define BOOT_PART_TABLE	RAW_ADDR (0x07be)
 
@@ -85,8 +95,23 @@ extern char *grub_scratch_mem;
  *  It is 32K in size, do not overrun!
  */
 
+#ifdef GRUB_UTIL
 #define FSYS_BUFLEN  0x8000
 #define FSYS_BUF RAW_ADDR (0x68000)
+#else
+#define FSYS_BUFLEN  0x8000
+#define FSYS_BUF RAW_ADDR (0x3E0000)
+#endif
+
+/* Paging structure : PML4, PDPT, PD  4096-bytes each */
+/* Memory area from 0x50000 to the end of low memory is used by gfxmenu. So we
+ * should not use 0x60000 for page tables. And all other free room in the low
+ * memory is reserved. So we should use extended memory if possible.
+ * Currently we use the ending 16K of the first 16M. -- tinybit
+ */
+//#define PAGING_TABLES_BUF	0x60000
+#define PAGING_TABLES_BUF	0xFFC000
+#define PAGING_TABLES_BUFLEN	0x4000
 
 /* Command-line buffer for Multiboot kernels and modules. This area
    includes the area into which Stage 1.5 and Stage 1 are loaded, but
@@ -100,7 +125,11 @@ extern char *grub_scratch_mem;
 #endif
 
 /* The buffer for the password.  */
+#ifdef GRUB_UTIL
 #define PASSWORD_BUF		RAW_ADDR (0x78000)
+#else
+#define PASSWORD_BUF		RAW_ADDR (0x3E8000)
+#endif
 #define PASSWORD_BUFLEN		0x200
 
 /* THe buffer for the filename of "/boot/grub/default".  */
@@ -200,6 +229,8 @@ extern char *grub_scratch_mem;
 #define NETWORK_DRIVE	0x20
 
 #define PXE_DRIVE	0x21
+#define INITRD_DRIVE	0x22
+#define FB_DRIVE	0x23
 
 /*
  *  GRUB specific information
@@ -265,13 +296,28 @@ extern char *grub_scratch_mem;
 
 #define CR0_PE_ON	0x1
 #define CR0_PE_OFF	0xfffffffe
-#define PROT_MODE_CSEG	0x8
+#define PROT_MODE_CSEG	40 /*0x8*/
 #define PROT_MODE_DSEG  0x10
 #define PSEUDO_RM_CSEG	0x18
-#define PSEUDO_RM_DSEG	0x20
+#define PSEUDO_RM_DSEG	8 /*0x20*/
 #define STACKOFF	MB_CMDLINE_BUF	/* (0x2000 - 0x10) */
 #define PROTSTACKINIT   (FSYS_BUF - 0x10)
 
+#define CR0_PE   0x00000001UL
+#define CR0_WP   0x00010000UL
+#define CR0_PG   0x80000000UL
+#define CR4_PSE  0x00000010UL
+#define CR4_PAE  0x00000020UL
+#define CR4_PGE  0x00000080UL
+#define PML4E_P  0x0000000000000001ULL
+#define PDPTE_P  0x0000000000000001ULL
+#define PDE_P    0x0000000000000001ULL
+#define PDE_RW   0x0000000000000002ULL
+#define PDE_US   0x0000000000000004ULL
+#define PDE_PS   0x0000000000000080ULL
+#define PDE_G    0x0000000000000100ULL
+#define MSR_IA32_EFER 0xC0000080UL
+#define IA32_EFER_LME 0x00000100ULL
 
 /*
  * Assembly code defines
@@ -360,12 +406,12 @@ extern char *grub_scratch_mem;
 #define ACS_DARROW	'v'
 
 /* Special graphics characters for IBM displays. */
-#define DISP_UL		218
-#define DISP_UR		191
-#define DISP_LL		192
-#define DISP_LR		217
-#define DISP_HORIZ	196
-#define DISP_VERT	179
+#define DISP_UL		(menu_broder.disp_ul)
+#define DISP_UR		(menu_broder.disp_ur)
+#define DISP_LL		(menu_broder.disp_ll)
+#define DISP_LR		(menu_broder.disp_lr)
+#define DISP_HORIZ	(menu_broder.disp_horiz)
+#define DISP_VERT	(menu_broder.disp_vert)
 #define DISP_LEFT	0x1b
 #define DISP_RIGHT	0x1a
 #define DISP_UP		0x18
@@ -393,6 +439,40 @@ extern char *grub_scratch_mem;
 
 #define PXE_TFTP_MODE	1
 #define PXE_FAST_READ	1
+
+/* see typedef gfx_data_t below */
+#define gfx_ofs_v1_ok			0x00
+#define gfx_ofs_v1_mem_start		0x04
+#define gfx_ofs_v1_mem_cur		0x08
+#define gfx_ofs_v1_mem_max		0x0c
+#define gfx_ofs_v1_code_seg		0x10
+#define gfx_ofs_v1_jmp_table		0x14
+#define gfx_ofs_v1_sys_cfg		0x44
+#define gfx_ofs_v1_cmdline		0x64
+#define gfx_ofs_v1_cmdline_len		0x68
+#define gfx_ofs_v1_menu_list		0x6c
+#define gfx_ofs_v1_menu_default_entry	0x70
+#define gfx_ofs_v1_menu_entries		0x74
+#define gfx_ofs_v1_menu_entry_len	0x78
+#define gfx_ofs_v1_args_list		0x7c
+#define gfx_ofs_v1_args_entry_len	0x80
+#define gfx_ofs_v1_timeout		0x84
+#define gfx_ofs_v1_mem_file		0x88
+#define gfx_ofs_v1_mem_align		0x8c
+
+#define gfx_ofs_v2_ok			0x00
+#define gfx_ofs_v2_code_seg		0x04
+#define gfx_ofs_v2_jmp_table		0x08
+#define gfx_ofs_v2_sys_cfg		0x38
+#define gfx_ofs_v2_cmdline		0x6c
+#define gfx_ofs_v2_cmdline_len		0x70
+#define gfx_ofs_v2_menu_list		0x74
+#define gfx_ofs_v2_menu_default_entry	0x78
+#define gfx_ofs_v2_menu_entries		0x7c
+#define gfx_ofs_v2_menu_entry_len	0x80
+#define gfx_ofs_v2_args_list		0x84
+#define gfx_ofs_v2_args_entry_len	0x88
+#define gfx_ofs_v2_timeout		0x8c
 
 #ifndef ASM_FILE
 /*
@@ -602,10 +682,32 @@ typedef enum
 //  ERR_INVALID_RD_BASE,
 //  ERR_INVALID_RD_SIZE,
   ERR_MD5_FORMAT,
+  ERR_WRITE_GZIP_FILE,
+  ERR_FUNC_CALL,
+//  ERR_WRITE_TO_NON_MEM_DRIVE,
+  ERR_INTERNAL_CHECK,
+  ERR_KERNEL_WITH_PROGRAM,
+  ERR_HALT,
+  ERR_PARTITION_LOOP,
 
   MAX_ERR_NUM
 } grub_error_t;
 
+struct broder {
+	unsigned char disp_ul;
+	unsigned char disp_ur;
+	unsigned char disp_ll;
+	unsigned char disp_lr;
+	unsigned char disp_horiz;
+	unsigned char disp_vert;
+	unsigned char menu_box_x; /* line start */
+	unsigned char menu_box_w; /* line width */
+	unsigned char menu_box_y; /* first line number */
+	unsigned char menu_box_h;
+	unsigned char menu_box_b;
+} __attribute__ ((packed));
+
+extern struct broder menu_broder;
 extern unsigned long install_partition;
 extern unsigned long boot_drive;
 //extern unsigned long install_second_sector;
@@ -618,7 +720,21 @@ extern char config_file[];
 extern unsigned long linux_text_len;
 extern char *linux_data_tmp_addr;
 extern char *linux_data_real_addr;
+extern char *linux_bzimage_tmp_addr;
 extern int quit_print;
+extern struct linux_kernel_header *linux_header;
+
+extern unsigned long free_mem_start;
+extern unsigned long free_mem_end;
+
+struct mem_alloc_array
+{
+  unsigned long addr;
+  unsigned long pid;
+};
+
+struct mem_alloc_array *mem_alloc_array_start;
+unsigned long mem_alloc_array_end;
 
 /* If not using config file, this variable is set to zero,
    otherwise non-zero.  */
@@ -648,11 +764,15 @@ extern void assign_device_name (int drive, const char *device);
 /* print debug message on startup if the DEBUG_KEY is pressed. */
 extern int debug_boot;
 extern int console_getkey (void);
+extern unsigned long long initrd_start_sector;
+extern int disable_map_info;
+extern int map_func (char *arg, int flags);
 //#define SLEEP {unsigned long i;for (i=0;i<0xFFFFFFFF;i++);}
 #define DEBUG_SLEEP {if (debug_boot) console_getkey ();}
 #endif
 
 extern void hexdump(unsigned long,char*,int);
+extern int builtin_cmd (char *cmd, char *arg, int flags);
 
 #ifndef STAGE1_5
 /* GUI interface variables. */
@@ -662,6 +782,65 @@ extern int fallback_entryno;
 extern int default_entry;
 extern int current_entryno;
 extern const char *preset_menu;
+
+
+/*
+ * graphics menu stuff
+ *
+ * Note: gfx_data and all data referred to in it must lie within a 64k area.
+ */
+typedef struct
+{
+  unsigned ok;			/* set while we're in graphics mode */
+  unsigned mem_start, mem_cur, mem_max;
+  unsigned code_seg;		/* code segment of binary graphics code */
+  unsigned jmp_table[12];	/* link to graphics functions */
+  unsigned char sys_cfg[32];	/* sys_cfg[0]: identifies boot loader (grub == 2) */
+  char *cmdline;		/* command line returned by gfx_input() */
+  unsigned cmdline_len;		/* length of the above */
+  char *menu_list;		/* list of menu entries, each of fixed length (menu_entry_len) */
+  char *menu_default_entry;	/* the default entry */
+  unsigned menu_entries;	/* number of entries in menu_list */
+  unsigned menu_entry_len;	/* one entry */
+  char *args_list;		/* same structure as menu_list, menu_entries entries */
+  unsigned args_entry_len;	/* one entry */
+  unsigned timeout;		/* in seconds (0: no timeout) */
+  unsigned mem_file;		/* aligned gfx file start */
+  unsigned mem_align;		/* aligned cpio file start */
+} __attribute__ ((packed)) gfx_data_v1_t;
+
+typedef struct
+{
+  unsigned ok;			/* set while we're in graphics mode */
+  unsigned code_seg;		/* code segment of binary graphics code */
+  unsigned jmp_table[12];	/* link to graphics functions */
+  unsigned char sys_cfg[52];	/* sys_cfg[0]: identifies boot loader (grub == 2) */
+  char *cmdline;		/* command line returned by gfx_input() */
+  unsigned cmdline_len;		/* length of the above */
+  char *menu_list;		/* list of menu entries, each of fixed length (menu_entry_len) */
+  char *menu_default_entry;	/* the default entry */
+  unsigned menu_entries;	/* number of entries in menu_list */
+  unsigned menu_entry_len;	/* one entry */
+  char *args_list;		/* same structure as menu_list, menu_entries entries */
+  unsigned args_entry_len;	/* one entry */
+  unsigned timeout;		/* in seconds (0: no timeout) */
+} __attribute__ ((packed)) gfx_data_v2_t;
+
+#ifdef SUPPORT_GFX
+/* pointer to graphics image data */
+extern char graphics_file[64];
+extern unsigned long gfx_drive, gfx_partition;
+
+int gfx_init_v1(gfx_data_v1_t *gfx_data);
+int gfx_done_v1(gfx_data_v1_t *gfx_data);
+int gfx_input_v1(gfx_data_v1_t *gfx_data, int *menu_entry);
+int gfx_setup_menu_v1(gfx_data_v1_t *gfx_data);
+
+int gfx_init_v2(gfx_data_v2_t *gfx_data);
+int gfx_done_v2(gfx_data_v2_t *gfx_data);
+int gfx_input_v2(gfx_data_v2_t *gfx_data, int *menu_entry);
+int gfx_setup_menu_v2(gfx_data_v2_t *gfx_data);
+#endif
 
 /* The constants for password types.  */
 typedef enum
@@ -702,7 +881,7 @@ extern unsigned long current_partition;
 
 extern int fsys_type;
 
-extern inline unsigned long log2_tmp (unsigned long word);
+//extern inline unsigned long log2_tmp (unsigned long word);
 extern void unicode_to_utf8 (unsigned short *filename, unsigned char *utf8, unsigned long n);
 
 /* The information for a disk geometry. The CHS information is only for
@@ -717,28 +896,34 @@ struct geometry
   /* The number of sectors */
   unsigned long sectors;
   /* The total number of sectors */
-  unsigned long total_sectors;
+  unsigned long long total_sectors;
   /* Device sector size */
   unsigned long sector_size;
   /* Flags */
   unsigned long flags;
 };
 
-extern unsigned long part_start;
-extern unsigned long part_length;
+extern unsigned long long part_start;
+extern unsigned long long part_length;
 
 extern unsigned long current_slice;
+
+#ifndef GRUB_UTIL
+extern unsigned long force_geometry_tune;
+#endif
 
 extern int buf_drive;
 extern int buf_track;
 extern struct geometry buf_geom;
 extern struct geometry tmp_geom;
 extern struct geometry fd_geom[4];
-extern struct geometry hd_geom[4];
+extern struct geometry hd_geom[8];
 
 /* these are the current file position and maximum file position */
-extern unsigned long filepos;
-extern unsigned long filemax;
+extern unsigned long long filepos;
+extern unsigned long long filemax;
+extern unsigned long long filesize;
+extern unsigned long long gzip_filemax;
 
 extern unsigned long emu_iso_sector_size_2048;
 
@@ -746,6 +931,7 @@ extern unsigned long emu_iso_sector_size_2048;
  *  Common BIOS/boot data.
  */
 
+extern char *end_of_low_16bit_code;
 extern struct multiboot_info mbi;
 extern unsigned long saved_drive;
 extern unsigned long saved_partition;
@@ -766,8 +952,9 @@ extern unsigned long cdrom_drive;
 //#endif
 extern unsigned long force_cdrom_as_boot_device;
 extern unsigned long ram_drive;
-extern unsigned long rd_base;
-extern unsigned long rd_size;
+extern unsigned long long rd_base;
+extern unsigned long long rd_size;
+extern unsigned long long saved_mem_higher;
 extern unsigned long saved_mem_upper;
 extern unsigned long saved_mem_lower;
 extern unsigned long saved_mmap_addr;
@@ -789,6 +976,7 @@ extern char *err_list[];
 typedef void (*entry_func) (int, int, int, int, int, int)
      __attribute__ ((noreturn));
 
+extern unsigned long cur_addr;
 extern entry_func entry_addr;
 
 /* Enter the stage1.5/stage2 C code after the stack is set up. */
@@ -836,11 +1024,14 @@ struct drive_map_slot
 					/* bit 7: in-situ */
 					/* bit 6: fake-write or safe-boot */
 
-	unsigned long start_sector;
-	unsigned long start_sector_hi;	/* hi dword of the 64-bit value */
-	unsigned long sector_count;
-	unsigned long sector_count_hi;	/* hi dword of the 64-bit value */
+	unsigned long long start_sector;
+	//unsigned long start_sector_hi;	/* hi dword of the 64-bit value */
+	unsigned long long sector_count;
+	//unsigned long sector_count_hi;	/* hi dword of the 64-bit value */
 };
+
+extern struct drive_map_slot   bios_drive_map[DRIVE_MAP_SIZE + 1];
+extern struct drive_map_slot hooked_drive_map[DRIVE_MAP_SIZE + 1];
 
 /* Copy MAP to the drive map and set up int13_handler.  */
 void set_int13_handler (struct drive_map_slot *map);
@@ -876,7 +1067,7 @@ void linux_boot (void) __attribute__ ((noreturn));
 void big_linux_boot (void) __attribute__ ((noreturn));
 
 /* booting a multiboot executable */
-void multi_boot (int start, int mb_info) __attribute__ ((noreturn));
+void multi_boot (int start, int mb_info, int, int, int, int, int) __attribute__ ((noreturn));
 
 /* If LINEAR is nonzero, then set the Intel processor to linear mode.
    Otherwise, bit 20 of all memory accesses is always forced to zero,
@@ -1005,6 +1196,7 @@ kernel_t;
 
 extern kernel_t kernel_type;
 extern int show_menu;
+extern int silent_hiddenmenu;
 #if !defined(STAGE1_5) && !defined(GRUB_UTIL)
 extern char *mbr;
 #endif
@@ -1017,7 +1209,8 @@ void enter_cmdline (char *heap, int forever);
 #endif
 
 /* C library replacement functions with identical semantics. */
-void grub_printf (const char *format,...);
+//void grub_printf (const char *format,...);
+#define grub_printf(...) grub_sprintf(NULL, __VA_ARGS__)
 int grub_sprintf (char *buffer, const char *format, ...);
 int grub_tolower (int c);
 int grub_isspace (int c);
@@ -1027,10 +1220,19 @@ void *grub_memmove (void *to, const void *from, int len);
 void *grub_memset (void *start, int c, int len);
 int grub_strncat (char *s1, const char *s2, int n);
 char *grub_strstr (const char *s1, const char *s2);
+char *grub_strtok (char *s, const char *delim);
 int grub_memcmp (const char *s1, const char *s2, int n);
 int grub_strcmp (const char *s1, const char *s2);
 int grub_strlen (const char *str);
 char *grub_strcpy (char *dest, const char *src);
+
+unsigned long long grub_memmove64(unsigned long long dst_addr, unsigned long long src_addr, unsigned long long len);
+unsigned long long grub_memset64(unsigned long long dst_addr, unsigned int data, unsigned long long len);
+int grub_memcmp64(unsigned long long str1addr, unsigned long long str2addr, unsigned long long len);
+//void grub_memset64 (unsigned long long start, unsigned long long c, unsigned long long len);
+//int grub_memcmp64 (const unsigned long long s1, const unsigned long long s2, unsigned long long n);
+//void grub_memmove64 (unsigned long long to, const unsigned long long from, unsigned long long len);
+int mem64 (int func, unsigned long long dest, unsigned long long src, unsigned long long len);
 
 #ifndef GRUB_UTIL
 typedef unsigned long grub_jmp_buf[6];
@@ -1046,6 +1248,7 @@ typedef unsigned long grub_jmp_buf[6];
 #else /* ! GRUB_UTIL */
 int grub_setjmp (grub_jmp_buf env);
 void grub_longjmp (grub_jmp_buf env, int val);
+extern unsigned long configfile_opened;
 #endif /* ! GRUB_UTIL */
 
 /* The environment for restarting Stage 2.  */
@@ -1061,22 +1264,35 @@ extern char *prompt;
 extern int maxlen;
 extern int echo_char;
 extern int readline;
-int get_cmdline (char *cmdline);
+struct get_cmdline_arg
+{
+	char *cmdline;
+	char *prompt;
+	int maxlen;
+	int echo_char;
+	int readline;
+} __attribute__ ((packed));
+extern struct get_cmdline_arg get_cmdline_str;
+int get_cmdline (struct get_cmdline_arg p_cmdline);
 int substring (const char *s1, const char *s2, int case_insensitive);
 int nul_terminate (char *str);
 int get_based_digit (int c, int base);
-int safe_parse_maxint (char **str_ptr, int *myint_ptr);
-int memcheck (unsigned long start, unsigned long len);
+int safe_parse_maxint_with_suffix (char **str_ptr, unsigned long long *myint_ptr, int unitshift);
+#define safe_parse_maxint(str_ptr, myint_ptr) safe_parse_maxint_with_suffix(str_ptr, myint_ptr, 0)
+//int safe_parse_maxint (char **str_ptr, unsigned long long *myint_ptr);
+int parse_string (char *arg);
+int memcheck (unsigned long long addr, unsigned long long len);
 void grub_putstr (const char *str);
+unsigned int grub_sleep (unsigned int seconds);
 
 #ifndef NO_DECOMPRESSION
 /* Compression support. */
 int gunzip_test_header (void);
-unsigned long gunzip_read (char *buf, unsigned long len);
+unsigned long long gunzip_read (unsigned long long buf, unsigned long long len);
 #endif /* NO_DECOMPRESSION */
 
-int rawread (unsigned long drive, unsigned long sector, unsigned long byte_offset, unsigned long byte_len, char *buf);
-int devread (unsigned long sector, unsigned long byte_offset, unsigned long byte_len, char *buf);
+int rawread (unsigned long drive, unsigned long sector, unsigned long byte_offset, unsigned long long byte_len, unsigned long long buf, unsigned long write);
+int devread (unsigned long sector, unsigned long byte_offset, unsigned long long byte_len, unsigned long long buf, unsigned long write);
 int rawwrite (unsigned long drive, unsigned long sector, char *buf);
 int devwrite (unsigned long sector, unsigned long sector_len, char *buf);
 
@@ -1102,13 +1318,14 @@ int next_partition (void);
 /* Open a file or directory on the active device, using GRUB's
    internal filesystem support. */
 int grub_open (char *filename);
-
+#define GRUB_READ 0xedde0d90
+#define GRUB_WRITE 0x900ddeed
 /* Read LEN bytes into BUF from the file that was opened with
    GRUB_OPEN.  If LEN is -1, read all the remaining data in the file.  */
-unsigned long grub_read (char *buf, unsigned long len);
+unsigned long long grub_read (unsigned long long buf, unsigned long long len, unsigned long write);
 
 /* Reposition a file offset.  */
-unsigned long grub_seek (unsigned long offset);
+//unsigned long grub_seek (unsigned long offset);
 
 /* Close a file.  */
 void grub_close (void);
@@ -1251,9 +1468,18 @@ struct drive_parameters
 } __attribute__ ((packed));
 
 int check_64bit (void);
+int check_64bit_and_PAE  (void);
 extern int is64bit;
+
+// mask for is64bit bits
+#define IS64BIT_PAE   1
+#define IS64BIT_AMD64 2
+
 extern int errorcheck;
 extern unsigned long pxe_restart_config;
+
+extern unsigned long saved_pxe_ip;
+extern unsigned char saved_pxe_mac[6];
 
 #ifdef FSYS_PXE
 
@@ -1266,7 +1492,7 @@ extern BOOTPLAYER *discover_reply;
 extern unsigned short pxe_basemem, pxe_freemem;
 extern unsigned long pxe_entry;
 extern unsigned long pxe_inited;
-extern char* pxe_scan(void);
+extern unsigned long pxe_scan(void);
 extern int pxe_detect(int, char *);
 extern void pxe_unload(void);
 extern int pxe_call(int func,void* data);
@@ -1280,6 +1506,8 @@ int pxe_func(char* arg,int flags);
 #define pxe_detect()
 
 #endif /* FSYS_PXE */
+
+extern unsigned long fb_status;
 
 #endif /* ! ASM_FILE */
 

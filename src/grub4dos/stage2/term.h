@@ -31,7 +31,11 @@ typedef enum
   /* represents the user defined colors for normal text */
   COLOR_STATE_NORMAL,
   /* represents the user defined colors for highlighted text */
-  COLOR_STATE_HIGHLIGHT
+  COLOR_STATE_HIGHLIGHT,
+  /* represents the user defined colors for help text */
+  COLOR_STATE_HELPTEXT,
+  /* represents the user defined colors for heading line */
+  COLOR_STATE_HEADING
 } color_state;
 
 #ifndef STAGE1_5
@@ -78,7 +82,7 @@ struct term_entry
   void (*setcolorstate) (color_state state);
   /* Set the normal color and the highlight color. The format of each
      color is VGA's.  */
-  void (*setcolor) (int normal_color, int highlight_color);
+  void (*setcolor) (int normal_color, int highlight_color, int helptext_color, int heading_color);
   /* Turn on/off the cursor.  */
   int (*setcursor) (int on);
 
@@ -107,7 +111,7 @@ int console_getxy (void);
 void console_gotoxy (int x, int y);
 void console_cls (void);
 void console_setcolorstate (color_state state);
-void console_setcolor (int normal_color, int highlight_color);
+void console_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color);
 int console_setcursor (int on);
 #endif
 
@@ -127,7 +131,7 @@ int hercules_getxy (void);
 void hercules_gotoxy (int x, int y);
 void hercules_cls (void);
 void hercules_setcolorstate (color_state state);
-void hercules_setcolor (int normal_color, int highlight_color);
+void hercules_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color);
 int hercules_setcursor (int on);
 #endif
 
@@ -141,7 +145,7 @@ int graphics_getxy(void);
 void graphics_gotoxy(int x, int y);
 void graphics_cls(void);
 void graphics_setcolorstate (color_state state);
-void graphics_setcolor (int normal_color, int highlight_color);
+void graphics_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color);
 int graphics_setcursor (int on);
 int graphics_init(void);
 void graphics_end(void);

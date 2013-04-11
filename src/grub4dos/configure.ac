@@ -165,12 +165,15 @@ case "$host_os" in
   mingw32 | cygwin)
     BIN_LDFLAGS="-Wl,-T"'$(top_srcdir)'"/ldscript"
     LDFLAGS="${LDFLAGS} -Wl,-T${srcdir}/ldscript"
+    BUILD_DIRS="netboot stage2 stage1"
     ;;
   *)
     BIN_LDFLAGS="-Wl,-N"
+    BUILD_DIRS="netboot stage2 stage1 lib grub util"
     ;;
 esac
 AC_SUBST(BIN_LDFLAGS)
+AC_SUBST(BUILD_DIRS)
 
 # Defined in acinclude.m4.
 grub_ASM_USCORE
@@ -320,6 +323,13 @@ AC_ARG_ENABLE(pxe,
 
 if test x"$enable_pxe" != xno; then
   FSYS_CFLAGS="$FSYS_CFLAGS -DFSYS_PXE=1"
+fi
+
+AC_ARG_ENABLE(fb,
+  [  --disable-fb            disable FB support in Stage 2])
+
+if test x"$enable_fb" != xno; then
+  FSYS_CFLAGS="$FSYS_CFLAGS -DFSYS_FB=1"
 fi
 
 dnl AC_ARG_ENABLE(tftp,
@@ -630,6 +640,11 @@ dnl Graphical splashscreen support
 AC_ARG_ENABLE(graphics,
   [  --disable-graphics      disable graphics terminal support])
 AM_CONDITIONAL(GRAPHICS_SUPPORT, test "x$enable_graphics" != xno)
+
+dnl gfxmenu support
+AC_ARG_ENABLE(gfxmenu,
+  [  --disable-gfxmenu       disable gfxmenu support])
+AM_CONDITIONAL(GFX_SUPPORT, test "x$enable_gfxmenu" != xno)
 
 dnl Hercules terminal
 AC_ARG_ENABLE(hercules,

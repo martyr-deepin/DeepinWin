@@ -20,6 +20,11 @@
 
 #define _FILE_OFFSET_BITS 64	// This is required to enable 64-bit off_t
 #include <unistd.h>
+#include <sys/ioctl.h>
+
+#ifndef BLKGETSIZE64
+#define BLKGETSIZE64  _IOR(0x12,114,size_t)    /* return device size */
+#endif /* ! BLKGETSIZE64 */
 
 #endif
 
@@ -27,6 +32,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <ctype.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "xdio.h"
 
@@ -52,6 +60,59 @@
 #define u_off_t		off_t	// In FreeBSD, off_t is 64-bit !
 #define u_lseek		lseek
 
+#endif
+
+#ifdef WIN32
+
+typedef struct _STORAGE_DEVICE_NUMBER {
+  DEVICE_TYPE DeviceType;
+  ULONG       DeviceNumber;
+  ULONG       PartitionNumber;
+} STORAGE_DEVICE_NUMBER, *PSTORAGE_DEVICE_NUMBER;
+
+int
+get_disk (char drive, int rdwr)
+{
+  STORAGE_DEVICE_NUMBER d1;
+  char dn[24];
+  HANDLE hd;
+  DWORD nr;
+  int i;
+
+  sprintf (dn, "\\\\.\\%c:", drive);
+  hd = CreateFile (dn, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		   NULL, OPEN_EXISTING, 0, 0);
+  if (hd == INVALID_HANDLE_VALUE)
+    return -1;
+
+  if (! DeviceIoControl (hd, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+			 NULL, 0, &d1, sizeof (d1), &nr, 0))
+    return -1;
+
+  CloseHandle (hd);
+
+  for (i = 0; i < MAX_DISKS; i++)
+    {
+      STORAGE_DEVICE_NUMBER d2;
+
+      sprintf (dn, "\\\\.\\PhysicalDrive%d", i);
+      hd = CreateFile (dn, ((rdwr) ? GENERIC_WRITE : 0) | GENERIC_READ,
+		       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+		       FILE_FLAG_WRITE_THROUGH | FILE_FLAG_NO_BUFFERING, 0);
+      if (hd == INVALID_HANDLE_VALUE)
+	continue;
+
+      if ((DeviceIoControl (hd, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+			    NULL, 0, &d2, sizeof (d2), &nr, 0)) &&
+	  (d1.DeviceType == d2.DeviceType) &&
+	  (d1.DeviceNumber == d2.DeviceNumber))
+	return (int) hd;
+
+      CloseHandle (hd);
+    }
+
+  return -1;
+}
 #endif
 
 xd_t *
@@ -98,7 +159,7 @@ xd_open (char *fn, int rdwr)
 #if defined(WIN32)
 	  sprintf (dn, "\\\\.\\PhysicalDrive%d", dd);
 #elif defined(LINUX)
-	  sprintf (dn, "/dev/hd%c", 'a' + dd);
+	  sprintf (dn, "/dev/sd%c", 'a' + dd);
 #elif defined(FREEBSD)
 	  sprintf (dn, "/dev/ad%d", dd);
 #else
@@ -122,10 +183,27 @@ xd_open (char *fn, int rdwr)
     }
 
 #ifdef WIN32
-  hd =
-    (int) CreateFile (fn, ((rdwr) ? GENERIC_WRITE : 0) | GENERIC_READ,
-		      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-		      FILE_FLAG_WRITE_THROUGH | FILE_FLAG_NO_BUFFERING, 0);
+  hd = -1;
+  if ((strlen (fn) == 2) && (fn[1] = ':'))
+    {
+      int c;
+
+      c = toupper (fn[0]);
+
+      if ((c >= 'A') && (c <= 'Z'))
+	{
+	  hd = get_disk (c, rdwr);
+	  tt |= XDF_DISK;
+	}
+    }
+
+  if (hd == -1)
+    hd =
+      (int) CreateFile (fn, ((rdwr) ? GENERIC_WRITE : 0) | GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+			((rdwr) && ((tt & XDF_DISK) == 0))? OPEN_ALWAYS :
+			OPEN_EXISTING,
+			FILE_FLAG_WRITE_THROUGH | FILE_FLAG_NO_BUFFERING, 0);
 #else
   hd = open (fn, ((rdwr) ? O_RDWR : O_RDONLY) | O_BINARY);
 #endif
@@ -225,7 +303,7 @@ xd_enum (xd_t * xd, xde_t * xe)
 
 	  if (xd_seek (xd, 0))
 	    return 1;
-	  if (xd_read (xd, ebuf, 1))
+	  if (xd_read (xd, (char *) ebuf, 1))
 	    return 1;
 	  if (valueat (ebuf, 0x1FE, unsigned short) != 0xAA55)
 	      return 1;
@@ -332,7 +410,7 @@ xd_enum (xd_t * xd, xde_t * xe)
 	    if (xd_seek (xd, xe->bse))
 	      return 1;
 
-	    if (xd_read (xd, ebuf, 1))
+	    if (xd_read (xd, (char *) ebuf, 1))
 	      return 1;
 
 	    if (valueat (ebuf, 0x1FE, unsigned short) != 0xAA55)
@@ -462,7 +540,97 @@ xd_size (xd_t * xd)
 
       return ((sz_lo >> 9) | (sz_hi << 23));
     }
+#elif defined(LINUX)
+  struct stat st;
+  int hd = xd->num;
+  unsigned long long nr;
+
+  if (! ioctl (hd, BLKGETSIZE64, &nr))
+    {
+      nr >>= 9;
+      return nr;
+    }
+
+  if (fstat (hd, &st) < 0)
+    return XD_INVALID_SIZE;
+
+  return st.st_size >> 9;
 #endif
 
   return XD_INVALID_SIZE;
+}
+
+#ifdef WIN32
+static HANDLE locked_volumes[24];
+#endif
+
+int
+xd_lock (xd_t * xd)
+{
+#ifdef WIN32
+  STORAGE_DEVICE_NUMBER d1;
+  DWORD nr;
+  char dn[8], c;
+
+  if (! (xd->flg & XDF_DISK))
+    return 0;
+
+  if (! DeviceIoControl ((HANDLE) xd->num, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+			 NULL, 0, &d1, sizeof (d1), &nr, 0))
+    return 0;
+
+  strcpy (dn, "\\\\.\\A:");
+  for (c = 'C'; c < 'Z'; c++)
+    {
+      HANDLE hd;
+      STORAGE_DEVICE_NUMBER d2;
+
+      dn[4] = c;
+      hd = CreateFile (dn, GENERIC_READ | GENERIC_WRITE,
+		       FILE_SHARE_READ | FILE_SHARE_WRITE,
+		       NULL, OPEN_EXISTING, 0, 0);
+      if (hd == INVALID_HANDLE_VALUE)
+	continue;
+
+      if ((! DeviceIoControl (hd, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+			      NULL, 0, &d2, sizeof (d2), &nr, 0)) ||
+	  (d1.DeviceType != d2.DeviceType) ||
+	  (d1.DeviceNumber != d2.DeviceNumber))
+	{
+	  CloseHandle (hd);
+	  continue;
+	}
+
+      if (! DeviceIoControl (hd, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0,
+			     &nr, 0))
+	return 1;
+
+      locked_volumes[c - 'C'] = hd;
+    }
+#else
+  (void) xd;
+#endif
+
+  return 0;
+}
+
+void
+xd_unlock (void)
+{
+#ifdef WIN32
+  int i;
+
+  for (i = 0; i < 24; i++)
+    if (locked_volumes[i])
+      {
+	DWORD nr;
+
+	DeviceIoControl (locked_volumes[i], IOCTL_DISK_UPDATE_PROPERTIES,
+			 NULL, 0, NULL, 0, &nr, 0);
+	DeviceIoControl (locked_volumes[i], FSCTL_DISMOUNT_VOLUME,
+			 NULL, 0, NULL, 0, &nr, 0);
+	CloseHandle (locked_volumes[i]);
+	locked_volumes[i] = 0;
+      }
+#endif
 }

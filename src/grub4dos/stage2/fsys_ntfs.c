@@ -30,6 +30,7 @@
 
 #include "shared.h"
 #include "filesys.h"
+#include "iamath.h"
 
 //#define NTFS_DEBUG	1
 
@@ -105,6 +106,7 @@
 #define get_rflag(a)	(ctx->flags & (a))
 
 static unsigned long mft_size,idx_size,spc,blocksize,mft_start;
+static unsigned char log2_bps, log2_bpc, log2_spc;
 
 typedef struct {
   int flags;
@@ -113,11 +115,13 @@ typedef struct {
   char *mft,*cur_run;
 } read_ctx;
 
+/* sbuf must be at 4K boundary!! read_block() require this.*/
 #define NAME_BUF	((char *)(FSYS_BUF))	/* 4096 bytes */
+#define TEMP_BUF	NAME_BUF		/* 4096 bytes */
 #define mmft		((char *)((FSYS_BUF)+4096))
 #define cmft		(mmft+1024+1024+4096)
-#define sbuf		(cmft+1024+1024+4096)
-#define cbuf		(sbuf+4096)
+#define sbuf		(cmft+1024+1024+4096)	/* 4096 bytes */
+#define cbuf		(sbuf+4096)		/* 4096 bytes */
 
 #define attr_flg	valueat(cur_mft,0,unsigned short)
 
@@ -125,7 +129,7 @@ typedef struct {
 #define attr_nxt	valueat(cur_mft,4,unsigned short)
 #define attr_end	valueat(cur_mft,6,unsigned short)
 
-#define save_pos	valueat(cur_mft,8,unsigned long)
+#define save_pos	valueat(cur_mft,8,unsigned long long)
 
 #define emft_buf	(cur_mft+1024)
 #define edat_buf	(cur_mft+2048)
@@ -159,7 +163,7 @@ static int fixup(char* buf,int len,char* magic)
   ss=valueat(buf,6,unsigned short)-1;
   if (ss*blocksize!=len*512)
     {
-      dbg_printf("Size not match %d!=%d\n",ss*blocksize,len*512);
+      dbg_printf("Size not match %d!=%d\n",(ss*blocksize),(len*512));
       return 0;
     }
   pu=buf+valueat(buf,4,unsigned short);
@@ -181,8 +185,8 @@ static int fixup(char* buf,int len,char* magic)
 }
 
 static int read_mft(char* cur_mft,unsigned long mftno);
-static int read_attr(char* cur_mft,char* dest,unsigned long ofs,unsigned long len,int cached);
-static int read_data(char* cur_mft,char* pa,char* dest,unsigned long ofs,unsigned long len,int cached);
+static int read_attr(char* cur_mft,unsigned long long dest,unsigned long long ofs,unsigned long long len,int cached,unsigned long write);
+static int read_data(char* cur_mft,char* pa,unsigned long long dest,unsigned long long ofs,unsigned long long len,int cached,unsigned long write);
 
 static void init_attr(char* cur_mft)
 {
@@ -209,8 +213,8 @@ back:
 
               if (cur_mft==mmft)
                 {
-                  if ((! devread(valueat(pa,0x10,unsigned long),0,512,emft_buf)) ||
-                      (! devread(valueat(pa,0x14,unsigned long),0,512,emft_buf+512)))
+                  if ((! devread(valueat(pa,0x10,unsigned long),0,512,(unsigned long long)(unsigned int)emft_buf, 0xedde0d90)) ||
+                      (! devread(valueat(pa,0x14,unsigned long),0,512,(unsigned long long)(unsigned int)(emft_buf+512), 0xedde0d90)))
                     {
                       dbg_printf("Read Error\n");
                       return NULL;
@@ -218,7 +222,7 @@ back:
 
                   if (! fixup(emft_buf,mft_size,"FILE"))
                     {
-                      dbg_printf("Invalid MFT at 0x%X\n",valueat(pa,0x10,unsigned long));
+                      dbg_printf("Invalid MFT at 0x%X\n",(valueat(pa,0x10,unsigned long)));
                       return NULL;
                     }
                 }
@@ -238,7 +242,7 @@ back:
                     }
                   new_pos+=valueat(new_pos,4,unsigned long);
                 }
-              dbg_printf("Can\'t find 0x%X in attribute list\n",(unsigned char)*pa);
+              dbg_printf("Can\'t find 0x%X in attribute list\n",(unsigned long)(unsigned char)*pa);
               return NULL;
             }
         }
@@ -260,16 +264,16 @@ back:
       pa=ofs2ptr(attr_end);
       if (pa[8])
         {
-          int n;
+          unsigned long n;
 
           n = (valueat(pa,0x30,unsigned long) + 511) & (~511);
-          if (n>4096)
+          if (n>4096 || valueat(pa,0x34,unsigned long)!=0)
             {
               dbg_printf("Non-resident attribute list too large\n");
               return NULL;
             }
           attr_cur=attr_end;
-          if (! read_data(cur_mft,pa,edat_buf,0,n,0))
+          if (! read_data(cur_mft,pa,(unsigned long long)(unsigned int)edat_buf,0,n,0, 0xedde0d90))
             {
               dbg_printf("Fail to read non-resident attribute list\n");
               return NULL;
@@ -308,7 +312,7 @@ back:
               pa=ofs2ptr(new_pos);
               if ((unsigned char)*pa!=attr)
                 break;
-              if (! read_attr(cur_mft,pa+0x10,valueat(pa,0x10,unsigned long)*(mft_size << BLK_SHR),mft_size << BLK_SHR,0))
+              if (! read_attr(cur_mft,(unsigned long long)(unsigned int)(pa+0x10),valueat(pa,0x10,unsigned long)*(mft_size << BLK_SHR),((unsigned long long)(mft_size)) << BLK_SHR,0, 0xedde0d90))
                 return NULL;
               new_pos+=valueat(pa,4,unsigned short);
             }
@@ -417,7 +421,7 @@ static int decomp_nextvcn(void)
       dbg_printf("C1\n");
       return 0;
     }
-  if (! devread((comp_table[comp_head][1]-(comp_table[comp_head][0]-cbuf_vcn))*spc,0,spc << BLK_SHR,cbuf))
+  if (! devread((comp_table[comp_head][1]-(comp_table[comp_head][0]-cbuf_vcn))*spc,0,spc << BLK_SHR,(unsigned long long)(unsigned int)cbuf, 0xedde0d90))
     {
       dbg_printf("Read Error\n");
       return 0;
@@ -457,11 +461,6 @@ static int decomp_block(char* dest)
           bits=copied=tag=0;
           while (cnt > 0)
             {
-              if (copied > 4096)
-                {
-                  dbg_printf("B1\n");
-                  return 0;
-                }
               if (! bits)
                 {
                   tag = decomp_getch();
@@ -493,16 +492,28 @@ static int decomp_block(char* dest)
                   delta = code >> dshift;
                   len = (code & lmask) + 3;
 
+		  if (copied + len > 4096)
+		    {
+		      dbg_printf("B3\n");
+		      return 0;
+		    }
+
                   for (i = 0; i < len; i++)
                     {
                       dest[copied] = dest[copied - delta - 1];
                       copied++;
                     }
                 } else
-                  {
-                    dest[copied++] = decomp_getch();
-                    cnt--;
-                  }
+                {
+		  if (copied > 4096 - 1)
+		    {
+		      dbg_printf("B4\n");
+		      return 0;
+		    }
+
+                  dest[copied++] = decomp_getch();
+                  cnt--;
+                }
               tag >>= 1;
               bits--;
             }
@@ -538,11 +549,17 @@ static int decomp_block(char* dest)
   return 1;
 }
 
-static int read_block(read_ctx* ctx,char* buf,int num)
+static int read_block(read_ctx* ctx, unsigned long long buf, int num, unsigned long long len, unsigned long write)
 {
   if (get_rflag(RF_COMP))
-    {
+  {
       int cpb=(8/spc);
+
+      if (write == 0x900ddeed)
+	{
+		grub_printf ("Fatal: Cannot write compressed file.\n");
+		return 0;
+	}
 
       while (num)
         {
@@ -594,7 +611,7 @@ static int read_block(read_ctx* ctx,char* buf,int num)
                 {
                   if (buf)
                     {
-                      memset(buf,0,nn*4096);
+                      grub_memset64 (buf,0,nn*4096);
                       buf+=nn*4096;
                     }
                 }
@@ -602,10 +619,15 @@ static int read_block(read_ctx* ctx,char* buf,int num)
                 {
                   while (nn)
                     {
-                      if (! decomp_block(buf))
+		      char *dest = TEMP_BUF;
+
+                      if (! decomp_block(dest))
                         return 0;
                       if (buf)
+		      {
+			grub_memmove64 (buf, (unsigned long long)(unsigned int)dest, 4096);
                         buf+=4096;
+		      }
                       nn--;
                     }
                 }
@@ -623,12 +645,12 @@ static int read_block(read_ctx* ctx,char* buf,int num)
                   ctx->target_vcn+=tt;
                   if (buf)
                     {
-                      if (! devread((comp_table[comp_head][1]-(comp_table[comp_head][0] - ctx->target_vcn))*spc,0,tt*(spc << BLK_SHR),buf))
+                      if (! devread((comp_table[comp_head][1]-(comp_table[comp_head][0] - ctx->target_vcn))*spc,0,(unsigned long long)tt*(spc << BLK_SHR),buf, 0xedde0d90))
                         {
                           dbg_printf("Read Error\n");
                           return 0;
                         }
-                      buf+=tt*(spc << BLK_SHR);
+                      buf+=(unsigned long long)tt*(spc << BLK_SHR);
                     }
                   nn-=tt;
                   if (ctx->target_vcn>=comp_table[comp_head][0])
@@ -638,216 +660,338 @@ static int read_block(read_ctx* ctx,char* buf,int num)
                 {
                   if (buf)
                     {
-                      if (! devread((ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn)*spc,0,nn*(spc << BLK_SHR),buf))
+                      if (! devread((ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn)*spc,0,(unsigned long long)nn*(spc << BLK_SHR),buf, 0xedde0d90))
                         {
                           dbg_printf("Read Error\n");
                           return 0;
                         }
-                      buf+=nn*(spc << BLK_SHR);
+                      buf+=(unsigned long long)nn*(spc << BLK_SHR);
                     }
                   ctx->target_vcn+=nn;
                 }
             }
         }
-    }
+  }
   else
-    {
+  {
       while (num)
-        {
-          int nn,ss;
+      {
+	  int nn, ss;
 
-          nn=(ctx->next_vcn - ctx->target_vcn) * spc - ctx->vcn_offset;
+	  nn = (ctx->next_vcn - ctx->target_vcn) * spc - ctx->vcn_offset;
 
-          if (nn>num)
-            nn=num;
+	  if (nn > num)
+	      nn = num;
 
-          if ((buf) && (nn))
-            {
-              if (get_rflag(RF_BLNK))
-                memset(buf,0,nn << BLK_SHR);
-              else
-                if (! devread((ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn)*spc
-                              + ctx->vcn_offset,0,nn << BLK_SHR,buf))
-                  {
-                    dbg_printf("Read Error\n");
-                    return 0;
-                  }
-              buf+=(nn << BLK_SHR);
-            }
-          ss=ctx->target_vcn * spc + ctx->vcn_offset + nn;
-          ctx->target_vcn=ss / spc;
-          ctx->vcn_offset=ss % spc;
-          num-=nn;
-          if (num==0)
-            break;
+	  if (len && nn)
+	  {
+		if (get_rflag (RF_BLNK))
+		{
+			if (write == 0x900ddeed)
+			{
+				grub_printf ("Fatal: Cannot write NULL blocks.\n");
+				return 0;
+			}
+			if (buf)
+				grub_memset64 (buf, 0, (unsigned long long)nn << BLK_SHR);
+		}
+		else
+		{
+			unsigned long s = (ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn) * spc + ctx->vcn_offset;
+			unsigned long o = 0;
 
-          if (ctx->target_vcn>=ctx->next_vcn)
-            {
-              ctx->cur_run=read_run_list(ctx,ctx->cur_run);
-              if (ctx->cur_run==NULL)
-                return 0;
-            }
-        }
-    }
+			if (write != 0x900ddeed)	/* read */
+				len = ((unsigned long long)nn << BLK_SHR);
+ 			else if (len == -1ULL)	/* long long of -1 for normal whole-block writing */
+				len = ((unsigned long long)nn << BLK_SHR);
+			else if ((long long)len < 0)	/* long long of -2, -3, ... for writing a piece of block */
+			{
+				len = -len;
+				len--;
+				if (len >= 512)
+					return 0;
+				//o = 512 - (unsigned long)len;
+
+				/* sbuf must be 4K align!! buf is now offset to sbuf. */
+				//o = ((unsigned long)buf) % 4096;
+				o = ((unsigned long)buf) & 4095;
+			}
+			if (! devread(s, o, len, buf, write))
+			{
+				dbg_printf("Read/Write Error\n");
+				return 0;
+			}
+		}
+		if (buf)
+			buf += ((unsigned long long)nn << BLK_SHR);
+	  }
+	  //ss = ctx->target_vcn * spc + ctx->vcn_offset + nn;
+	  //ctx->target_vcn = ss / spc;
+	  //ctx->vcn_offset = ss % spc;
+	  ss = (ctx->target_vcn << log2_spc) + ctx->vcn_offset + nn;
+	  ctx->target_vcn = ss >> log2_spc;
+	  ctx->vcn_offset = ss & (spc-1);
+	  num -= nn;
+	  if (num == 0)
+		break;
+
+          if (ctx->target_vcn >= ctx->next_vcn)
+	  {
+		ctx->cur_run = read_run_list (ctx, ctx->cur_run);
+		if (ctx->cur_run == NULL)
+			return 0;
+	  }
+      }
+  }
   return 1;
 }
 
-static int read_data(char* cur_mft,char* pa,char* dest,unsigned long ofs,unsigned long len,int cached)
+static int read_data(char* cur_mft,char* pa,unsigned long long dest,unsigned long long ofs,unsigned long long len,int cached,unsigned long write)
 {
-  unsigned long vcn,blk_size;
-  read_ctx cc,*ctx;
-  int ret;
+    unsigned long vcn, blk_size;
+    unsigned char log2_blk_size;
+    read_ctx cc, *ctx;
+    int ret;
 
-  if (len==0)
-    return 1;
+    if (len == 0)
+	return 1;
 
-  ctx=&cc;
+    ctx = &cc;
 
-  if (pa[8]==0)
+    if (pa[8] == 0)
     {
-      if (ofs+len>valueat(pa,0x10,unsigned long))
-        {
-          dbg_printf("Read out of range\n");
-          return 0;
-        }
-      memcpy(dest,pa+valueat(pa,0x14,unsigned long)+ofs,len);
-      return 1;
+	if (write == 0x900ddeed)	/* write */
+	{
+		grub_printf ("Fatal: Cannot write resident/small file! Enlarge it to 2KB and try again.\n");
+		return 0;
+	}
+	if (ofs + len > valueat(pa,0x10,unsigned long))
+	{
+		dbg_printf("Read out of range\n");
+		return 0;
+	}
+	if (dest)
+		grub_memmove64 (dest, (unsigned long long)(unsigned int)(pa + valueat(pa,0x14,unsigned long) + ofs), len);
+	return 1;
     }
 
-  ctx->mft=cur_mft;
-  set_rflag(RF_COMP,valueat(pa,0xC,unsigned short) & FLAG_COMPRESSED);
-  ctx->cur_run=pa+valueat(pa,0x20,unsigned short);
-  blk_size=(get_rflag(RF_COMP))?4096:512;
+    ctx->mft = cur_mft;
+    set_rflag(RF_COMP, valueat(pa,0xC,unsigned short) & FLAG_COMPRESSED);
+    ctx->cur_run = pa + valueat(pa,0x20,unsigned short);
+    //blk_size = (get_rflag(RF_COMP)) ? 4096 : 512;
+    log2_blk_size = (get_rflag(RF_COMP)) ? 12 : 9 ;
+    blk_size = 1UL << log2_blk_size;
 
-  if ((get_rflag(RF_COMP)) && (! cached))
+    if ((get_rflag(RF_COMP)) && (! cached))
     {
-      dbg_printf("Attribute can\'t be compressed\n");
-      return 0;
+	dbg_printf("Attribute can\'t be compressed\n");
+	return 0;
     }
 
-  if (cached)
+    if (cached && write != 0x900ddeed)	/* read */
     {
-      if ((ofs & (~(blk_size-1)))==save_pos)
-        {
-          int n;
+	//if ((ofs & (~(blk_size - 1))) == save_pos)
+	if ((ofs & (-(unsigned long long)blk_size)) == save_pos)
+	{
+		unsigned long n,bofs;
 
-          n=blk_size - (ofs - save_pos);
-          if (n>len)
-            n=len;
+		//if (write == 0x900ddeed)	/* write */
+		//{
+		//	grub_printf ("Fatal: Cannot write file with save_pos!\n");
+		//	return 0;
+		//}
+		bofs = (unsigned long)ofs - (unsigned long)save_pos;
+		n = blk_size - bofs;
+		if (n > len)
+		    n = len;
 
-          memcpy(dest,sbuf + ofs - save_pos,n);
-          if (n==len)
-            return 1;
+		if (dest)
+		{
+//			if (write == 0x900ddeed)	/* write */
+//			memcpy (sbuf + ofs - save_pos, dest, n);
+//			else
+			grub_memmove64 (dest, (unsigned long long)(unsigned long)(sbuf + bofs), n);
+		}
+		if (n == len)
+			return 1;
 
-          dest+=n;
-          len-=n;
-          ofs+=n;
-        }
+		if (dest)
+			dest += n;
+		len -= n;
+		ofs += n;
+	}
     }
 
-  if (get_rflag(RF_COMP))
+    if (get_rflag(RF_COMP))
     {
-      vcn=ctx->target_vcn=(ofs / 4096) * (8 / spc);
-      ctx->vcn_offset=0;
-      ctx->target_vcn &= ~0xF;
-      comp_head=comp_tail=0;
+	vcn = ctx->target_vcn = (ofs & (-4096ULL)) >> log2_bpc;
+	ctx->vcn_offset = 0;
+	ctx->target_vcn &= ~0xF;
+	comp_head = comp_tail = 0;
     }
-  else
+    else
     {
-      vcn=ctx->target_vcn=(ofs >> BLK_SHR) / spc;
-      ctx->vcn_offset=(ofs >> BLK_SHR) % spc;
-    }
-
-  ctx->next_vcn=valueat(pa,0x10,unsigned long);
-  ctx->curr_lcn=0;
-  while (ctx->next_vcn<= ctx->target_vcn)
-    {
-      ctx->cur_run=read_run_list(ctx,ctx->cur_run);
-      if (ctx->cur_run==NULL)
-        return 0;
+	//vcn = ctx->target_vcn = (ofs >> BLK_SHR) / spc;
+	//ctx->vcn_offset = (ofs >> BLK_SHR) % spc;
+	vcn = ctx->target_vcn = ofs >> log2_bpc;
+	ctx->vcn_offset = (ofs >> BLK_SHR) & (spc-1);
     }
 
-  if (get_aflag(AF_GPOS))
+    ctx->next_vcn = valueat(pa,0x10,unsigned long);
+    ctx->curr_lcn = 0;
+    while (ctx->next_vcn <= ctx->target_vcn)
     {
-      valueat(dest,0,unsigned long)=(ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn)*spc + ctx->vcn_offset;
-      valueat(dest,4,unsigned long)=valueat(dest,0,unsigned long)+1;
-      if (valueat(dest,4,unsigned long)==(ctx->next_vcn - ctx->curr_vcn + ctx->curr_lcn)*spc)
-        {
-          ctx->cur_run=read_run_list(ctx,ctx->cur_run);
-          if (ctx->cur_run==NULL)
-            return 0;
-          valueat(dest,4,unsigned long)=ctx->curr_lcn*spc;
-        }
-      return 1;
+	ctx->cur_run = read_run_list (ctx, ctx->cur_run);
+	if (ctx->cur_run == NULL)
+		return 0;
     }
 
-  if ((vcn>ctx->target_vcn) &&
-      (! read_block(ctx,NULL,((vcn - ctx->target_vcn) * spc) / 8 )))
-    return 0;
-
-  ret=0;
-
-  if ((cached) && (valueat(pa,0xC,unsigned short) & (FLAG_COMPRESSED + FLAG_SPARSE))==0)
-    disk_read_func = disk_read_hook;
-
-  if (ofs % blk_size)
+    if (get_aflag(AF_GPOS))
     {
-      unsigned long t,n,o;
+	unsigned long tmp1, tmp2;
 
-      if (! cached)
-        {
-          dbg_printf("Invalid range\n");
-          goto fail;
-        }
-
-      t=ctx->target_vcn*(spc << BLK_SHR);
-      if (! read_block(ctx,sbuf,1))
-        goto fail;
-
-      save_pos=t;
-
-      o=ofs % blk_size;
-      n=blk_size - o;
-      if (n>len)
-        n=len;
-      memcpy(dest,&sbuf[o],n);
-      if (n==len)
-        goto done;
-      dest+=n;
-      len-=n;
+	tmp2 = tmp1 = (ctx->target_vcn - ctx->curr_vcn + ctx->curr_lcn) * spc + ctx->vcn_offset;
+	tmp2++;
+	if (dest)
+	{
+		valueat((char *)(unsigned int)dest,0,unsigned long) = tmp1;
+		valueat((char *)(unsigned int)dest,4,unsigned long) = tmp2;
+	}
+	if (tmp2 == (ctx->next_vcn - ctx->curr_vcn + ctx->curr_lcn) * spc)
+	{
+		ctx->cur_run = read_run_list (ctx, ctx->cur_run);
+		if (ctx->cur_run == NULL)
+			return 0;
+		if (dest)
+			valueat((char *)(unsigned int)dest,4,unsigned long) = ctx->curr_lcn * spc;
+	}
+	return 1;
     }
 
-  if (! read_block(ctx,dest,len / blk_size))
-    goto fail;
+    if ((vcn > ctx->target_vcn) &&
+	//(! read_block (ctx, 0ULL, ((vcn - ctx->target_vcn) * spc) / 8, 0, 0xedde0d90)))
+	(! read_block (ctx, 0ULL, ((vcn - ctx->target_vcn) << log2_spc) >> 3, 0, 0xedde0d90)))
+	return 0;
 
-  dest+=(len / blk_size) * blk_size;
-  len=len % blk_size;
-  if (len)
+    ret = 0;
+
+    if ((cached) && (valueat(pa,0xC,unsigned short) & (FLAG_COMPRESSED + FLAG_SPARSE))==0)
+	disk_read_func = disk_read_hook;
+    else if (write == 0x900ddeed)	/* write */
     {
-      unsigned long t;
+	grub_printf("Fatal: Cannot write compressed or sparse file!\n");
+	goto fail;
+    }
 
-      if (! cached)
-        {
-          dbg_printf("Invalid range\n");
-          goto fail;
-        }
+    /* read the beginning piece of data(if any) upto a block boundary. */
+    //if (ofs % blk_size)
+    if ((unsigned long)ofs & (blk_size-1))
+    {
+	unsigned long long t;
+	unsigned long n, o;
 
-      t=ctx->target_vcn * (spc << BLK_SHR);
-      if (! read_block(ctx,sbuf,1))
-        goto fail;
+	if (! cached)
+	{
+		dbg_printf("Invalid range\n");
+		goto fail;
+	}
 
-      save_pos=t;
+	o = ofs & (blk_size-1);
+	n = blk_size - o;
+	if (n > len)
+	    n = len;
 
-      memcpy(dest,sbuf,len);
+	if (dest && write == 0x900ddeed)	/* write */
+		grub_memmove64 ((unsigned long long)(unsigned int)&sbuf[o], dest, n);
+
+	//t = ctx->target_vcn * (spc << BLK_SHR);
+	t = (unsigned long long)(ctx->target_vcn) << log2_bpc;
+	//if (! read_block (ctx, sbuf, 1, -1, 0xedde0d90))	/* read */
+	/* (-n-1) is long long value ranging from -2, -3, ..., -blk_size */
+	/* sbuf must be 4K align !! */
+	if (! read_block (ctx, (unsigned long long)(unsigned int)(write == 0x900ddeed ? &sbuf[o] : sbuf), 1, ((-(long long)n)-1), write))	/* read/write */
+		goto fail;
+
+	if (write != 0x900ddeed)	/* read */
+	{
+		save_pos = t;
+		if (dest)
+		{
+			//if (write == 0x900ddeed)	/* write */
+			//{
+			//    if (grub_memcmp (dest, &sbuf[o], n) == 0)
+			//	goto next;
+			//    memcpy (&sbuf[o], dest, n);
+			//    if (! read_block (ctx, sbuf, 1, -1, write))	/* write */
+			//	goto fail;
+			//    goto next;
+			//}
+			grub_memmove64 (dest, (unsigned long long)(unsigned int)&sbuf[o], n);
+		}
+	}
+//next:
+	if (n == len)
+		goto done;
+	if (dest)
+		dest += n;
+	len -= n;
+    }
+
+    //if (! read_block (ctx, dest, ((unsigned int)len) / blk_size, -1ULL, write)) /* read/write */	/* XXX: 64-bit ? */
+    if (! read_block (ctx, dest, len >> log2_blk_size, -1ULL, write)) /* read/write */
+	goto fail;
+
+    if (dest)
+	//dest += (((unsigned int)len) / blk_size) * blk_size;	/* XXX: 64-bit ? */
+	dest += len & (-(unsigned long long)blk_size);
+
+    //len = ((unsigned int)len) % blk_size;	/* XXX: 64-bit ? */
+    len = ((unsigned long)len) & (blk_size-1);
+
+    if (len)
+    {
+	unsigned long long t;
+
+	if (! cached)
+	{
+		dbg_printf("Invalid range\n");
+		goto fail;
+	}
+
+	if (dest && write == 0x900ddeed)	/* write */
+		grub_memmove64 ((unsigned long long)(unsigned int)sbuf, dest, len);
+
+	//t = ctx->target_vcn * (spc << BLK_SHR);
+	t = (unsigned long long)(ctx->target_vcn) << log2_bpc;
+	if (! read_block (ctx, (unsigned long long)(unsigned int)sbuf, 1, len, write))	/* read/write */
+		goto fail;
+
+	if (write != 0x900ddeed)	/* read */
+	{
+		save_pos = t;
+		if (dest)
+		{
+			//if (write == 0x900ddeed)	/* write */
+			//{
+			//	if (grub_memcmp (dest, sbuf, len) == 0)
+			//		goto done;
+			//	memcpy (sbuf, dest, len);
+			//	if (! read_block (ctx, sbuf, 1, -1, write))	/* write */
+			//		goto fail;
+			//	goto done;
+			//}
+			grub_memmove64 (dest, (unsigned long long)(unsigned int)sbuf, len);
+		}
+	}
     }
 done:
-  ret=1;
+    ret = 1;
 fail:
-  disk_read_func = NULL;
-  return ret;
+    disk_read_func = NULL;
+    return ret;
 }
 
-static int read_attr(char* cur_mft,char* dest,unsigned long ofs,unsigned long len,int cached)
+static int read_attr(char* cur_mft,unsigned long long dest,unsigned long long ofs,unsigned long long len,int cached, unsigned long write)
 {
   unsigned short save_cur;
   unsigned char attr;
@@ -862,7 +1006,8 @@ static int read_attr(char* cur_mft,char* dest,unsigned long ofs,unsigned long le
       unsigned short new_pos;
       unsigned long vcn;
 
-      vcn=ofs / (spc<<BLK_SHR);
+      //vcn=ofs / (spc<<BLK_SHR);
+      vcn=ofs >> log2_bpc;
       new_pos=attr_nxt+valueat(ofs2ptr(attr_nxt),4,unsigned short);
       while (new_pos<attr_end)
         {
@@ -878,14 +1023,14 @@ static int read_attr(char* cur_mft,char* dest,unsigned long ofs,unsigned long le
         }
     }
   pp=find_attr(cur_mft,attr);
-  ret=(pp)?read_data(cur_mft,pp,dest,ofs,len,cached):0;
+  ret=(pp)?read_data(cur_mft,pp,dest,ofs,len,cached,write):0;
   attr_cur=save_cur;
   return ret;
 }
 
 static int read_mft(char* buf,unsigned long mftno)
 {
-  if (! read_attr(mmft,buf,mftno*(mft_size << BLK_SHR),mft_size << BLK_SHR,0))
+  if (! read_attr(mmft,(unsigned long long)(unsigned int)buf,mftno*(mft_size << BLK_SHR),((unsigned long long)(mft_size)) << BLK_SHR,0, 0xedde0d90))
     {
       dbg_printf("Read MFT 0x%X fails\n",mftno);
       return 0;
@@ -922,7 +1067,7 @@ static int init_file(char* cur_mft,unsigned long mftno)
       if (! pa[8])
         filemax=valueat(pa,0x10,unsigned long);
       else
-        filemax=valueat(pa,0x30,unsigned long);
+        filemax=valueat(pa,0x30,unsigned long long);
 
       if (! get_aflag(AF_ALST))
         attr_end=0;		// Don't jump to attribute list
@@ -1060,7 +1205,7 @@ static int scan_dir(char* cur_mft,char *fn)
             }
           bitmap=(unsigned char*)cbuf;
           bitmap_len=valueat(cur_pos,0x30,unsigned long);
-          if (! read_data(cur_mft,cur_pos,cbuf,0,valueat(cur_pos,0x28,unsigned long),0))
+          if (! read_data(cur_mft,cur_pos,(unsigned long long)(unsigned int)cbuf,0,valueat(cur_pos,0x28,unsigned long),0, 0xedde0d90))
             {
               dbg_printf("Fails to read non-resident $BITMAP\n");
               goto error;
@@ -1096,7 +1241,7 @@ static int scan_dir(char* cur_mft,char *fn)
         {
           if (*bitmap & v)
             {
-              if ((! read_attr(cur_mft,sbuf,i*(idx_size<<BLK_SHR),(idx_size<<BLK_SHR),0)) ||
+              if ((! read_attr(cur_mft,(unsigned long long)(unsigned int)sbuf,i*((unsigned long long)idx_size<<BLK_SHR),((unsigned long long)idx_size<<BLK_SHR),0, 0xedde0d90)) ||
                   (! fixup(sbuf,idx_size,"INDX")))
                 goto error;
               ret=list_file(cur_mft,fn,&sbuf[0x18+valueat(sbuf,0x18,unsigned short)]);
@@ -1133,7 +1278,7 @@ int ntfs_mount (void)
     return 0;
 #endif
 
-  if (! devread (0, 0, 512, mmft))
+  if (! devread (0, 0, 512, (unsigned long long)(unsigned int)mmft, 0xedde0d90))
     return 0;
 
 #if 0
@@ -1142,14 +1287,16 @@ int ntfs_mount (void)
 #endif
 
   blocksize=valueat(mmft,0xb,unsigned short);
-
   if (blocksize != 512)
     return 0;
+  log2_bps = log2_tmp(blocksize);
 
-  spc=(blocksize*valueat(mmft,0xd,unsigned char)) >> BLK_SHR;
-
+  //spc=(blocksize*valueat(mmft,0xd,unsigned char)) >> BLK_SHR;
+  spc = valueat(mmft,0xd,unsigned char) << (log2_bps - BLK_SHR);
   if (!spc || (128 % spc))
     return 0;
+  log2_spc = log2_tmp(spc);
+  log2_bpc = log2_spc + BLK_SHR;
 
   if (valueat(mmft,0x10,unsigned long) != 0)
     return 0;
@@ -1184,7 +1331,7 @@ int ntfs_mount (void)
   if ((mft_size>MAX_MFT) ||(idx_size>MAX_IDX))
     return 0;
 
-  if (! devread(mft_start,0,mft_size << BLK_SHR,mmft))
+  if (! devread(mft_start,0,mft_size << BLK_SHR,(unsigned long long)(unsigned int)mmft, 0xedde0d90))
     return 0;
 
   if (! fixup(mmft,mft_size,"FILE"))
@@ -1212,12 +1359,12 @@ int ntfs_dir (char *dirname)
 #ifndef STAGE1_5
   if ((*dirname=='#') && (dirname[1]>='0') && (dirname[1]<='9'))
     {
-      int mftno;
+      unsigned long long mftno;
 
       dirname++;
       if (! safe_parse_maxint(&dirname,&mftno))
         return 0;
-      return init_file(cmft,mftno);
+      return init_file(cmft,(unsigned long)mftno);
     }
 #endif
 
@@ -1265,7 +1412,8 @@ int ntfs_dir (char *dirname)
   return ret;
 }
 
-unsigned long ntfs_read(char *buf, unsigned long len)
+unsigned long long
+ntfs_read(unsigned long long buf, unsigned long long len, unsigned long write)
 {
   char *cur_mft;
 
@@ -1273,10 +1421,10 @@ unsigned long ntfs_read(char *buf, unsigned long len)
   if (valueat(cur_mft,0x16,unsigned short) & 2)
     goto error;
 
-  if (disk_read_hook)
+  //if (disk_read_hook) /* commented out by chenall, 2010-05-13 */
     save_pos=1;
 
-  if (! read_attr(cmft,buf,filepos,len,1))
+  if (! read_attr(cmft,buf,filepos,len,1,write))
     goto error;
 
   filepos+=len;
@@ -1359,9 +1507,9 @@ void print_runlist(char *run)
       else
         putchar(',');
       if (ctx.flags & RF_BLNK)
-        printf("(+%d)",(ctx.next_vcn-ctx.curr_vcn)*spc);
+        printf("(+%d)",((ctx.next_vcn-ctx.curr_vcn)*spc));
       else
-        printf("%d+%d",ctx.curr_lcn*spc,(ctx.next_vcn-ctx.curr_vcn)*spc);
+        printf("%d+%d",(ctx.curr_lcn*spc),((ctx.next_vcn-ctx.curr_vcn)*spc));
       if (*run==0)
         break;
     }
@@ -1374,9 +1522,9 @@ void ntfs_inode_info(int level)
   int first;
 
   cur_mft=cmft;
-  printf("Type: %s\n",(valueat(cur_mft,0x16,unsigned short) & 2)?"Directory":"File");
+  printf("Type: %s\n",((valueat(cur_mft,0x16,unsigned short) & 2)?"Directory":"File"));
   if (valueat(cur_mft,0x20,unsigned long))
-    printf("Base: 0x%X\n",valueat(cur_mft,0x20,unsigned long));
+    printf("Base: 0x%X\n",(valueat(cur_mft,0x20,unsigned long)));
   printf("Attr:\n");
 
   first=1;
@@ -1393,7 +1541,7 @@ void ntfs_inode_info(int level)
               first=0;
             }
         }
-      printf("  %s (0x%X) ",attr2str(*pos),(unsigned char)*pos);
+      printf("  %s (0x%X) ",attr2str(*pos),(unsigned long)(unsigned char)*pos);
 
       printf((pos[8])?"(nr":"(r");
 
@@ -1407,9 +1555,9 @@ void ntfs_inode_info(int level)
 
       if (get_aflag(AF_ALST))
         {
-          printf(",mft=0x%X",valueat(ofs2ptr(attr_cur),0x10,unsigned long));
+          printf(",mft=0x%X",(valueat(ofs2ptr(attr_cur),0x10,unsigned long)));
           if (pos[8])
-            printf(",vcn=0x%X",valueat(ofs2ptr(attr_cur),0x8,unsigned long));
+            printf(",vcn=0x%X",(valueat(ofs2ptr(attr_cur),0x8,unsigned long)));
         }
 
       if (pos[9])
@@ -1418,7 +1566,7 @@ void ntfs_inode_info(int level)
           print_name(pos+valueat(pos,0xA,unsigned short),pos[9]);
         }
 
-      printf(",sz=%d",valueat(pos,((pos[8])?0x30:0x10),unsigned long));
+      printf(",sz=%d",(valueat(pos,((pos[8])?0x30:0x10),unsigned long)));
 
       printf(")\n");
       if ((pos[8]) && (! get_aflag(AF_ALST)))

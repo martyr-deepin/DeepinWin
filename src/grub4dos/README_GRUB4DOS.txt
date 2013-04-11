@@ -7,7 +7,7 @@ Download site:		http://grub4dos.sourceforge.net/
 Download site:		http://sarovar.org/projects/grub4dos/
 Download site:		http://grub4dos.nufans.net/
 Download site:		http://sites.google.com/site/grubdos/
-Download site:		http://grub4dos.jot.com/
+Download site:		ftp://grub4dos.sarovar.org/pub/grub4dos/
 
 Get the latest source code by using anonymous svn in this way:
 
@@ -303,6 +303,9 @@ Update 8:	Added ram drive (rd). The (md) device accesses the memory
 		greater than or equal to 0x80(but should avoid using 0xffff,
 		because 0xffff is for the (md) device).
 
+		The notation (rd)+1 always represents the file which contains
+		all the bytes stored in (rd).
+
 Update 9:	Directly boot NTLDR of WinNT/2K/XP and IO.SYS of Win9x/ME and
 		KERNEL.SYS of FreeDOS. Examples:
 
@@ -353,6 +356,17 @@ Update 9:	Directly boot NTLDR of WinNT/2K/XP and IO.SYS of Win9x/ME and
 
 		Bean has successfully decompressed and booted IO.SYS of WinME.
 		Thanks for the great job!
+
+Update 10:	isolinux.bin (version 3.73) can be chainloaded as with build
+		2009-02-09.
+
+			chainloader (cd)/isolinux.bin
+
+		isolinux.bin must reside in a real or virtual cdrom.
+
+Update 11:	stage2 of Grub Legacy can be chainloaded in this way:
+
+			chainloader --force --load-segment=0 --load-offset=0x8000 --boot-cs=0 --boot-ip=0x8200 (...)/.../stage2
 
 --------------------------------------------------------
 
@@ -2114,28 +2128,15 @@ FAT12/16/32 partition and place the same copy of GRLDR and MENU.LST there.
 	of stage2. It will fail for the buggy DELL machine when stage2 is
 	accessed with LBA mode.
 
-2. Some newer machines have no int15/AH=87h support. You may encounter failure
-	when accessing a memdrive.
+2. Some buggy BIOSes won't boot bootable.iso(See above).(qemu can boot it fine)
 
-3. Some buggy BIOSes won't boot bootable.iso(See above).(qemu can boot it fine)
+3. Some newer Dell machines violently destroyed the interrupt vectors for
+	hardware IRQs and will hang the machine when running GRUB.EXE
+	from DOS. You may try again with BADGRUB.EXE.
 
-4. Some BIOSes have no int15/AH=24h(gate A20 control) support. It will
-	encounter problems with GRUB4DOS in the future.
-
-5. Some USB BIOSes have a buggy int13/AH=08h function which returns incorrect
-	geometry in CX and DH registers. They will encounter various failure.
-
-	Note: The int13/AH=08h function call is very important for the normal
-	CHS-mode int13 disk access. If there is no other way to determine the
-	geometry, a USB BIOS programmer should probe the first sector of the
-	USB storage device and give a right geometry for the int13/AH=08h call.
-	A good BIOS programmer should implement EBIOS functions for USB storage
-	devices, especially functions 41h, 42h, 43h and 48h, which are very
-	important for BIOS-based programs or systems such as GRUB and DOS.
-
-6. Reports say some newer Dell machines violently destroyed the int0d vector
-	and will cause failure or even hang the machine when running GRUB.EXE
-	from DOS.
+4. Reports say some BIOSes will function abnormally after GRUB.EXE is started
+	by kexec of Linux. Some machines reportedly hang. Some others
+	reportedly cannot access USB drives.
 
 
 ******************************************************************************
@@ -2947,6 +2948,7 @@ grldr as boot file.
 You may also want to load a different menu.lst for different client. GRUB4DOS
 will scan the following location for configuration file:
 
+	[/mybootdir]/menu.lst
 	[/mybootdir]/menu.lst/01-88-99-AA-BB-CC-DD
 	[/mybootdir]/menu.lst/C000025B
 	[/mybootdir]/menu.lst/C000025
@@ -2965,7 +2967,7 @@ mybootdir=tftp.
 
 If none of the above files is present, grldr will use its embeded menu.lst.
 
-This is a menu.lst to illstrate how to use files from the tftp server.
+This is a menu.lst to illustrate how to use files from the tftp server.
 
 	title Create ramdisk using map
 	map --mem (pd)/floppy.img (fd0)
@@ -3288,9 +3290,12 @@ will not produce bifurcate drives.
 GRLDR can be used as the PXE boot file on a remote/network server. The (pd)
 device is used to access files on the server. When GRLDR is booted through
 network, it will use its preset menu as the config file. However, you may use
-a "pxe detect" command, which acts the same way as PXELINUX:
+a "pxe detect" command, which acts this way:
 
-    * First, it will search for the config file using the hardware type (using
+    * First, it will search for the config file "menu.lst" in the same dir as
+      grldr.
+
+    * Second, it will search for the config file using the hardware type (using
       its ARP type code) and address, all in hexadecimal with dash separators;
       for example, for an Ethernet (ARP type 1) with address 88:99:AA:BB:CC:DD
       it would search for the filename 01-88-99-AA-BB-CC-DD. 
@@ -3303,16 +3308,17 @@ a "pxe detect" command, which acts the same way as PXELINUX:
       88:99:AA:BB:CC:DD and the IP address 192.0.2.91, it will try following
       files (in that order): 
 
-       /mybootdir/menu.lst/01-88-99-AA-BB-CC-DD
-       /mybootdir/menu.lst/C000025B
-       /mybootdir/menu.lst/C000025
-       /mybootdir/menu.lst/C00002
-       /mybootdir/menu.lst/C0000
-       /mybootdir/menu.lst/C000
-       /mybootdir/menu.lst/C00
-       /mybootdir/menu.lst/C0
-       /mybootdir/menu.lst/C
-       /mybootdir/menu.lst/default
+       /mybootdir/menu.lst
+       /mybootdir/menu/01-88-99-AA-BB-CC-DD
+       /mybootdir/menu/C000025B
+       /mybootdir/menu/C000025
+       /mybootdir/menu/C00002
+       /mybootdir/menu/C0000
+       /mybootdir/menu/C000
+       /mybootdir/menu/C00
+       /mybootdir/menu/C0
+       /mybootdir/menu/C
+       /mybootdir/menu/default
 
 You cannot directly map an image file on (pd). You must map it in memory using
 the --mem option. For example,
@@ -3452,8 +3458,8 @@ Note2: Under Linux you may directly write the partition. That is to say, Step
 	1 and Step 3 are not needed. Simply use its device name instead of
 	MYPART.TMP.
 
-Note3: grubinst has the feature of installing grldr boot code onto a partiton
-	boot area.
+Note3: grubinst has the feature of installing grldr boot code onto a
+	partition boot area.
 
 ******************************************************************************
 ***                Use a single key to select menu item                    ***
@@ -3543,7 +3549,417 @@ not work on your system.
 ******************************************************************************
 
 Now the preset menu holds the highest priority. It will gain control prior to
-the menu.lst on the boot device. If a 'configfile' command occurs in the menu
-init command group, then control will go to the menu.lst on the boot device.
+the menu.lst on the boot device. If a 'configfile' command(without specifying
+any file as the parameter) occurs in the menu init command group of the preset
+menu, then control will go to the menu.lst on the boot device.
+
+Note: You should better not use "configfile ANOTHER_MENU" frequently in your
+menu.lst file, because it could create infinite loop and thus hang your
+computer.
+
+
+******************************************************************************
+***                    New command 'dd' to copy files                      ***
+******************************************************************************
+
+Usage:
+
+dd if=IF of=OF [bs=BS] [count=C] [skip=IN] [seek=OUT] [buf=ADDR] [buflen=SIZE]
+
+Copy file IF to OF. BS is blocksize in bytes, default to 512. C is blocks to
+copy, default is total blocks in IF. IN specifies number of blocks to skip
+when read, default is 0. OUT specifies number of blocks to skip when write,
+default is 0. Skipped blocks are not touched. Both IF and OF must exist.
+
+Both IF and OF must have a leading device name, i.e.,  of the form `(...)'.
+You may use `()' for the current root device.
+
+dd can neither enlarge nor reduce the size of OF, the leftover tail of IF
+will be discarded. OF cannot be a gzipped file. If IF is a gzipped file,
+it will be decompressed automatically when copying.
+
+dd is dangerous, use at your own risk. To be on the safe side, you should
+only use dd to write a file in memory.
+
+In some cases when writing a file in a NTFS volume, dd might fail.
+
+If you attempt to write a device or a block file that is not in memory by
+starting dd in a menu, you will safely be refused :-) (Update: no restrictions
+now)
+
+Update: New options are implemented for user defined buffer. By default,
+the buffer is at address 0x50000, and length is 0x10000(=64KB). You cannot
+specify ADDR to be lower than 0x100000(=1MB). Besides, you must specify SIZE
+larger than 0x10000(=64KB). Normally you want ADDR >= 0x1000000(=16MB), and
+SIZE also >= 16MB. A large SIZE could speed up the progression of dd.
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!!!!
+!!!!    Caution! Both IF and OF can be a device name which stands for     !!!!
+!!!!    all the sectors on the device. Take utmost care!                  !!!!
+!!!!______________________________________________________________________!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+******************************************************************************
+***              New command 'uuid' to identify partitions                 ***
+******************************************************************************
+
+Usage:
+
+	uuid [DEVICE] [UUID]
+
+If DEVICE is not specified, search for filesystem with UUID in all partitions
+and set the partition containing the filesystem as new root (if UUID is
+specified), or just list uuid's of all filesystems on all devices (if UUID is
+not specified). If DEVICE is specified, return true or false according to
+whether or not the DEVICE matches the specified UUID (if UUID is specified),
+or just list the uuid of DEVICE (if UUID is not specified).
+
+Example 1:
+
+	find --set-root uuid () 7f95820f-5e33-4e6c-8f50-0760bf06d79c
+
+which will find a partition with uuid=7f95820f-5e33-4e6c-8f50-0760bf06d79c
+and set the partition as root if found.
+
+Example 2:
+
+	uuid ()
+
+which will print the uuid of the current root device.
+
+
+******************************************************************************
+***                     gfxmenu support in grub4dos                        ***
+******************************************************************************
+
+Gfxmenu support has been added to grub4dos. To use it, you must first find the
+message file you need, then load it in menu.lst with command like this:
+
+	gfxmenu /message
+
+This should be a gloabl command, that is, not inside any menu item. Also, it
+can only be used in configure file, running it in console mode does not work.
+
+gfxmenu does not work in conjunction with the password feature.
+
+There are two major format of message file. Old format is created with gfxboot
+3.2.* or older (size of message file is normally about 150K), while new format
+is created with gfxboot 3.3.* and later (size of message file is normally above
+300K). Both format are supported in grub4dos.
+
+
+******************************************************************************
+***           Use 'write' to write a string into a device or file          ***
+******************************************************************************
+
+Usage:
+
+	write [--offset=SKIP] ADDR_OR_FILE INTEGER_OR_STRING
+
+SKIP is an integer and defaults to 0.
+
+If ADDR_OR_FILE is an integer, then it is treated as a memory address, and
+INTEGER_OR_STRING must be an integer value. The integer INTEGER_OR_STRING
+will be written to address (ADDR_OR_FILE + SKIP).
+
+If ADDR_OR_FILE is a device or a file, then INTEGER_OR_STRING is treated as
+a string which will be written to ADDR_OR_FILE at offset SKIP (in bytes).
+
+The string is quoted with nothing, that is, neither with the single quote
+char(') nor with the double quote char(").
+
+Space char must be quoted with back slash(\). (Update: need not now)
+
+Single quote char(') and double quote char(") are not interpreted specially
+and can be used directly in the string.
+
+Some C-style quote sequences are interpreted as follows:
+
+	\NNN	character with octal value NNN (1 to 3 digits)
+
+	\\	backslash
+
+	\a	alert (BEL)
+
+	\b	backspace
+
+	\f	form feed
+
+	\n	new line
+
+	\r	carriage return
+
+	\t	horizontal tab
+
+	\v	vertical tab
+
+	\xHH	byte with hexadecimal value HH (1 to 2 digits)
+
+Just like dd, the write can neither enlarge nor reduce the size of the
+destination file, the leftover tail of the string will be discarded.
+The destination file cannot be a gzipped file.
+
+Again like dd, the write command is also dangerous, use at your own risk.
+And to be on the safe side, you should only write to memory files.
+
+In some cases when writing a file in a NTFS volume, the write might fail.
+
+If you attempt to write a device or a block file that is not in memory by
+using write in a menu, you will safely be refused :-) (Update: no restrictions
+now)
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!!!!
+!!!!    Caution! The file to write can be a device name which stands      !!!!
+!!!!    for all the sectors on the device. Take utmost care!              !!!!
+!!!!______________________________________________________________________!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+******************************************************************************
+***                 Item-by-item help text for menu entries                ***
+******************************************************************************
+
+
+The help message at the bottom of the screen will vary as you choose the menu.
+
+You may append your help text to the title line. The help text must begin
+with "\n", for example:
+
+	title This is the title\nThis is the help text.\nAnd this is the 2nd line of the help text.
+
+Some C-style quote sequences are interpreted as stated in the section above.
+
+
+******************************************************************************
+***        initrd can load multiple cpio files for Linux 2.6 kernels       ***
+******************************************************************************
+
+Usage:
+
+	initrd FILE [FILE ...]
+
+Note 1: You should not load more than one oldstyle disk images in this way,
+because this is not supported by Linux kernel.
+
+Note 2: The FILEs should be specified in the same order as with syslinux.
+
+******************************************************************************
+***            access some internel variables at a fixed location          ***
+******************************************************************************
+
+Address		Length		Description
+=========	========	==============================================
+0000:8208	4 (DWORD)	install_partition (the boot partition)
+0000:8280	4 (DWORD)	boot_drive (the boot drive)
+0000:8284	4 (DWORD)	pxe_yip (your ip)
+0000:8288	4 (DWORD)	pxe_sip (server ip)
+0000:828C	4 (DWORD)	pxe_gip (gateway ip)
+0000:8290	8 (QWORD)	filesize (file size by last "cat --length=0")
+0000:8298	4 (DWORD)	saved_mem_upper (extended memory size in KB)
+0000:829C	4 (DWORD)	saved_partition (current root partition)
+0000:82A0	4 (DWORD)	saved_drive (current root drive)
+0000:82A4	4 (DWORD)	no_decompression (no auto gunzip)
+0000:82A8	8 (QWORD)	part_start (start sector of last partition)
+0000:82B0	8 (QWORD)	part_length (total sectors of last partition)
+
+Note 1: Filesize can be initialised/modified by using "cat --length=0 FILE".
+Note 2: You should not write these variables by hand(should read only).
+Note 3: You may use 1K at 6000:0000 for your own varibles(See note 4).
+Note 4: The read command now returns the integer value at the given address.
+Note 5: Grub4dos does not have the variable expansion feature. You can only
+	use integer variables. You need not declare them, but use the memory
+	address directly. Usually you want to use variables as a logical
+	value or in a command for conditional test, e.g., of this form:
+		 "checkrange RANGE read ADDR"
+Note 6: no_decompression, saved_drive and saved_partition are writable.
+
+
+******************************************************************************
+***            possibility to run another menu.lst after gfxmenu           ***
+******************************************************************************
+
+Notice the use of CONFIGFILE after GFXMENU in the following example:
+
+	# The menu.lst file for gfxmenu
+	default=0
+	timeout=5
+	gfxmenu /message
+	configfile /another.lst
+	title 0..........
+	................
+	title 1..........
+	................
+	title 2..........
+	................
+	# End of menu.lst
+
+	# Begin another.lst
+	default=0
+	timeout=5
+	title 0..........
+	................
+	title 1..........
+	................
+	title 2..........
+	................
+	# End of another.lst
+
+This will try gfxmenu command first. On exit(or on failure) control will go
+to another.lst file.
+
+
+******************************************************************************
+***                   a range of drives can be unmapped                    ***
+******************************************************************************
+
+Usage:
+
+	map --unmap=RANGE
+
+RANGE is a range of BIOS drive numbers to be unmapped. BIOS drive number 0
+is for the first floppy, 1 is for the second floppy; 0x80 is for the first
+hard drive, 0x81 is for the second hard drive, etc; virtual cdrom (hd32)
+corresponds to BIOS drive number 0xA0, (hd33) corresponds to 0xA1, etc.
+
+For description on RANGE, please refer to section `The New Command CHECKRANGE'
+above.
+
+Example 1:
+
+	map --unmap=0,0x80,0xff
+
+This will unmap virtual floppy (fd0), virtual hard drive (hd0) and virtual
+cdrom (0xff).
+
+Example 2:
+
+	map --unmap=0:0xff
+
+This will unmap all virtual floppies, all virtual hard drives and all virtual
+cdroms.
+
+Note 1: Normally a `map' command will add an item in the drive map table for
+	a virtual drive. But `--unmap' means items in the drive map table
+	(for the specified virtual drives) will be deleted.
+Note 2:	The --unhook option only breaks the INT13 hook(to the inerrupt
+	vector table). It will not affect the drive map table. And later on
+	execution of a `boot' command, the INT13 disk emulation routine will
+	automatically get hooked(to the interrupt vector table) when needed
+	(e.g., the drive map table is non-empty) even if it has been unhooked.
+Note 3: Usually you want to do a `map --rehook' after you have changed the
+	drive map table.
+
+
+******************************************************************************
+***                         geometry tune and sync                         ***
+******************************************************************************
+
+When a USB storage device is connected to a (or another) machine, the geometry
+in the partition table or in the BPB of the volume could be invalid, and the
+machine could hang at boot time. So you need to find out the correct geometry
+for the drive (use `geometry --tune'), and then update the geometry in
+partition table and BPB of the drive(use `geometry --sync').
+
+The above steps are required if you are going to boot DOS, because DOS
+requires the right geometry in the partition table and BPB. Windows/Linux may
+also require it, since the boot process could run in real-mode.
+
+
+******************************************************************************
+***                            Version numbering                           ***
+******************************************************************************
+
+Now we append a letter 'a', 'b', 'c' or 'p' to the version number(e.g., 0.4.5).
+So the version will become 0.4.5a, 0.4.5b, 0.4.5c, 0.4.5 or 0.4.5p.
+
+'a' - alpha test. unstable, especially when there are known bugs.
+'b' - beta test. the developers think it has no bugs and want a widely testing.
+'c' - release candidate.
+''(nothing) - official release.
+'p' - patched versions to the official release.
+
+
+******************************************************************************
+***                          Running User Programs                         ***
+******************************************************************************
+
+From 0.4.5 on, user programs can be developed for running under grub4dos. The
+executable program file must end with the 8-byte grub4dos EXEC signature:
+
+		0x05, 0x18, 0x05, 0x03, 0xBA, 0xA7, 0xBA, 0xBC
+
+The executable must have no relocations, and the entry point is at the very
+beginning of the file, just like a DOS .com file(but the grub4dos executable
+is 32-bit).
+
+Here is a sample file echo.c:
+
+/*================ begin echo.c ================*/
+
+/*
+ * compile:			
+
+gcc -nostdlib -fno-zero-initialized-in-bss -fno-function-cse -fno-jump-tables -Wl,-N -fPIE echo.c
+
+ * disassemble:			objdump -d a.out
+ * confirm no relocation:	readelf -r a.out
+ * generate executable:		objcopy -O binary a.out b.out
+ *
+ * and then the resultant b.out will be grub4dos executable.
+ */
+
+/*
+ * This is a simple ECHO command, running under grub4dos.
+ */
+
+int i = 0x66666666;	/* this is needed, see the following comment. */
+
+/* gcc treat the following as data only if a global initialization like the
+ * above line occurs.
+ */
+
+/* a valid executable file for grub4dos must end with these 8 bytes */
+asm(".long 0x03051805");
+asm(".long 0xBCBAA7BA");
+/* thank goodness gcc will place the above 8 bytes at the end of the b.out
+ * file. Do not insert any other asm lines here.
+ */
+
+int
+main()
+{
+        void *p = &main;
+
+	return
+	/* the following line is calling the grub_sprintf function. */
+	((int (*)(char *, const char *, ...))((*(int **)0x8300)[0]))
+	/* the following line includes arguments passed to grub_sprintf. */
+		(0, p - (*(int *)(p - 8)));
+}
+
+/*================  end  echo.c ================*/
+
+0x8300 is a pointer to the grub4dos system funtions(API). The system_functions
+variable is defined in asm.S.
+
+
+******************************************************************************
+***                      Map options added by Karyonix                     ***
+******************************************************************************
+
+(from boot-land.net) Karyonix's note:
+
+map --add-mbt= option to be used with --mem. If =0 master boot track will not
+	be added automatically.
+map --top option to be used with --mem. map --mem will try to allocate memory
+	at highest available address.
+map --mem-max=, map --mem-min options to be used before map --mem. Allow user
+	to manually limit range of address that map --mem can use.
+
+safe_parse_maxint_with_suffix function parses K,M,G,T suffix after number.
 
 

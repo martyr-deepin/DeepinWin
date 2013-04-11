@@ -44,10 +44,16 @@ biosdisk (int read, int drive, struct geometry *geometry,
 	  int sector, int nsec, int segment)
 {
   int err;
-  
+  int max_sec, start, count, seg;
+
+  if ((fb_status) && (drive == ((fb_status >> 8) & 0xff)))
+    max_sec = fb_status & 0xff;
+  else
+    max_sec = nsec;
+ 
   /* first, use EBIOS if possible */
   if ((geometry->flags & BIOSDISK_FLAG_LBA_EXTENSION) && (! (geometry->flags & BIOSDISK_FLAG_BIFURCATE) || (drive & 0xFFFFFF00) == 0x100))
-    {
+    {      
       struct disk_address_packet
       {
 	unsigned char length;
@@ -68,32 +74,55 @@ biosdisk (int read, int drive, struct geometry *geometry,
        */
       dap = (struct disk_address_packet *)0x580;
 
-      if (drive == 0xffff || (drive == ram_drive && rd_base != 0xffffffff))
+      if (drive == 0xffff || (drive == ram_drive && rd_base != -1ULL))
       {
-	char *disk_sector;
-	char *buf_address;
+	unsigned long long disk_sector;
+	unsigned long long buf_address;
+	unsigned long long tmp;
 	
 	if (nsec <=0 || nsec >= 0x80)
 		return 1;	/* failure */
+	if ((unsigned long long)((unsigned long)sector + (unsigned long)nsec) > geometry->total_sectors)
+		return 1;	/* failure */
+	//if ((unsigned long)sector + (unsigned long)nsec >= 0x800000)
+	//	return 1;	/* failure */
 	
-	disk_sector = (char *)((sector<<9) + ((drive==0xffff) ? 0 : rd_base));
-	buf_address = (char *)(segment<<4);
+	tmp = (((unsigned long long)(unsigned long)sector+(unsigned long long)(unsigned long)nsec) << 9);
+	if (drive == ram_drive)
+	    tmp += rd_base;
+	if (tmp > 0x100000000ULL && ! is64bit)
+		return 1;	/* failure */
+	disk_sector = (((unsigned long long)((unsigned long)sector)<<9) + ((drive==0xffff) ? 0 : rd_base));
+	buf_address = (segment<<4);
 
 	if (read)	/* read == 1 really means write to DISK */
-		grub_memmove (disk_sector, buf_address, nsec << 9);
+		grub_memmove64 (disk_sector, buf_address, nsec << 9);
 	else		/* read == 0 really means read from DISK */
-		grub_memmove (buf_address, disk_sector, nsec << 9);
+		grub_memmove64 (buf_address, disk_sector, nsec << 9);
 		
 	return 0;	/* success */
       }
 
-      dap->length = 0x10;
-      dap->block = sector;
-      dap->blocks = nsec;
-      dap->reserved = 0;
-      dap->buffer = segment << 16;
-      
-      err = biosdisk_int13_extensions ((read + 0x42) << 8, (unsigned char)drive, dap);
+      start = sector;
+      count = nsec;
+      seg = segment;
+      do
+	{
+	  int n;
+
+	  n = (count > max_sec) ? max_sec : count;
+
+	  dap->length = 0x10;
+	  dap->block = start;
+	  dap->blocks = n;
+	  dap->reserved = 0;
+	  dap->buffer = seg << 16;
+
+	  err = biosdisk_int13_extensions ((read + 0x42) << 8, (unsigned char)drive, dap);
+	  start += n;
+	  count -= n;
+	  seg += n << 5;
+	} while ((count) && (! err));
 
       if (!err)
 	return 0;	/* success */
@@ -125,10 +154,20 @@ biosdisk (int read, int drive, struct geometry *geometry,
       head = sector / geometry->sectors;
       head_offset = head % geometry->heads;
       cylinder_offset = head / geometry->heads;
-      
-      err = biosdisk_standard (read + 0x02, drive,
-			       cylinder_offset, head_offset, sector_offset,
-			       nsec, segment);
+
+      do
+	{
+	  int n;
+
+	  n = (nsec > max_sec) ? max_sec : nsec;
+
+	  err = biosdisk_standard (read + 0x02, drive,
+				   cylinder_offset, head_offset, sector_offset,
+				   n, segment);
+	  sector_offset += n;
+	  nsec -= n;
+	  segment += n << 5;
+	} while ((nsec) && (! err));
     }
 
   return err;
@@ -194,7 +233,9 @@ static unsigned long flags;
 static unsigned long cylinders;
 static unsigned long heads;
 static unsigned long sectors;
-
+#ifndef GRUB_UTIL
+unsigned long force_geometry_tune = 0;
+#endif
 
 /* Return the geometry of DRIVE in GEOMETRY. If an error occurs, return
    non-zero, otherwise zero.  */
@@ -207,9 +248,9 @@ get_diskinfo (int drive, struct geometry *geometry)
 
   if (drive == 0xffff)	/* memory disk */
     {
-      unsigned long long total_mem_bytes;
+      unsigned long long total_mem_sectors;
 
-      total_mem_bytes = 0;
+      total_mem_sectors = 0;
 
       if (mbi.flags & MB_INFO_MEM_MAP)
         {
@@ -223,37 +264,44 @@ get_diskinfo (int drive, struct geometry *geometry)
 	      if (map->Type != MB_ARD_MEMORY)
 		  continue;
 	      top_end =  map->BaseAddr + map->Length;
-	      if (top_end > 0x100000000ULL)
-		  top_end = 0x100000000ULL;
-	      if (total_mem_bytes < top_end)
-		  total_mem_bytes = top_end;
+	      /* check overflow... */
+	      if (top_end < map->BaseAddr && top_end < map->Length)
+		  total_mem_sectors = 0x80000000000000ULL;
+	      else
+		{
+		  if (top_end > 0x100000000ULL && ! is64bit)
+		      top_end = 0x100000000ULL;
+		  if (total_mem_sectors < (top_end >> SECTOR_BITS))
+		      total_mem_sectors = (top_end >> SECTOR_BITS);
+		}
 
 	    }
         }
       else
 	  grub_printf ("Address Map BIOS Interface is not activated.\n");
 
-      if (total_mem_bytes)
-      {
+//      if (total_mem_sectors)
+//      {
 	geometry->flags = BIOSDISK_FLAG_LBA_EXTENSION;
 	geometry->sector_size = SECTOR_SIZE;
-	geometry->total_sectors = (total_mem_bytes /*+ SECTOR_SIZE - 1*/) >> SECTOR_BITS;
+	/* if for some reason(e.g., a bios bug) the memory is reported less than 1M(too few), then we suppose the memory is unlimited. */
+	geometry->total_sectors = (total_mem_sectors < 0x800ULL ? 0x80000000000000ULL : total_mem_sectors);
 	geometry->heads = 255;
 	geometry->sectors = 63;
-	geometry->cylinders = (geometry->total_sectors + 255 * 63 -1) / (255 * 63);
+	geometry->cylinders = (geometry->total_sectors > (0xFFFFFFFFULL - 255 * 63 + 1) ? 0xFFFFFFFFUL / (255UL * 63UL):((unsigned long)geometry->total_sectors + 255 * 63 -1) / (255 * 63));
 	return 0;
-      }
+//      }
       
     } else if (drive == ram_drive)	/* ram disk device */
     {
-      if (rd_base != 0xffffffff)
+      if (rd_base != -1ULL)
       {
 	geometry->flags = BIOSDISK_FLAG_LBA_EXTENSION;
 	geometry->sector_size = SECTOR_SIZE;
-	geometry->total_sectors = (rd_size ? ((rd_size + SECTOR_SIZE - 1)>> SECTOR_BITS) : 0x800000);
+	geometry->total_sectors = (rd_size >> SECTOR_BITS) + !!(rd_size & (SECTOR_SIZE - 1));
 	geometry->heads = 255;
 	geometry->sectors = 63;
-	geometry->cylinders = (geometry->total_sectors + 255 * 63 -1) / (255 * 63);
+	geometry->cylinders = (geometry->total_sectors > (0xFFFFFFFFULL - 255 * 63 + 1) ? 0xFFFFFFFFUL / (255UL * 63UL):((unsigned long)geometry->total_sectors + 255 * 63 -1) / (255 * 63));
 	return 0;
       }
     }
@@ -290,6 +338,7 @@ get_diskinfo (int drive, struct geometry *geometry)
 	}
       
 #if (! defined(GRUB_UTIL)) && (! defined(STAGE1_5))
+    if (! force_geometry_tune)
     {
 	unsigned long j;
 	unsigned long d;
@@ -308,18 +357,39 @@ get_diskinfo (int drive, struct geometry *geometry)
 
 		if (((unsigned char)drive) != hooked_drive_map[j].from_drive)
 			continue;
+		/* this is a mapped drive */
 		if ((hooked_drive_map[j].max_sector & 0x3E) == 0 && hooked_drive_map[j].start_sector == 0 && hooked_drive_map[j].sector_count <= 1)
 		{
 			/* this is a map for the whole drive. */
 			d = hooked_drive_map[j].to_drive;
 			j = DRIVE_MAP_SIZE;	/* real drive */
+			break;
 		}
-		break;
+		//break;
+		/* this is a drive emulation, get the geometry from the drive map table */
+		if (hooked_drive_map[j].to_cylinder & 0x2000)
+		{
+			geometry->flags = BIOSDISK_FLAG_CDROM | BIOSDISK_FLAG_LBA_EXTENSION;
+			geometry->heads = 255;
+			geometry->sectors = 15;
+			geometry->sector_size = 2048;
+			geometry->total_sectors = hooked_drive_map[j].sector_count >> 2;
+			geometry->cylinders = (geometry->total_sectors > (0xFFFFFFFFULL - 255 * 15 + 1) ? 0xFFFFFFFFUL / (255UL * 15UL):((unsigned long)geometry->total_sectors + 255 * 15 -1) / (255 * 15));
+			return 0;
+		}
+		geometry->flags = BIOSDISK_FLAG_LBA_EXTENSION;
+		geometry->heads = hooked_drive_map[j].max_head + 1;
+		geometry->sectors = hooked_drive_map[j].max_sector & 0x3F;
+		geometry->sector_size = 512;
+		geometry->total_sectors = hooked_drive_map[j].sector_count;
+		geometry->cylinders = (geometry->heads * geometry->sectors);
+		geometry->cylinders = (geometry->total_sectors > (0xFFFFFFFFULL - geometry->cylinders + 1) ? 0xFFFFFFFFUL / geometry->cylinders:((unsigned long)geometry->total_sectors + geometry->cylinders - 1) / geometry->cylinders);
+		return 0;
 	    }
 
 	if (j == DRIVE_MAP_SIZE)	/* real drive */
 	{
-	    if (d >= 0x80 && d < 0x84)
+	    if (d >= 0x80 && d < 0x88)
 	    {
 		d -= 0x80;
 		if (hd_geom[d].sector_size == 512 && hd_geom[d].sectors > 0 && hd_geom[d].sectors <= 63 && hd_geom[d].heads <= 256)
@@ -525,19 +595,19 @@ get_diskinfo (int drive, struct geometry *geometry)
 	if (drive & 0x80)
 	if (probed_cylinders != geometry->cylinders)
 	    if (debug > 1)
-		grub_printf ("\nWarning: %s cylinders(%d) is not equal to the BIOS one(%d).\n", (char *)err, probed_cylinders, geometry->cylinders);
+		grub_printf ("\nWarning: %s cylinders(%d) is not equal to the BIOS one(%d).\n", err, probed_cylinders, geometry->cylinders);
 
 	geometry->cylinders = probed_cylinders;
 
 	if (probed_heads != geometry->heads)
 	    if (debug > 1)
-		grub_printf ("\nWarning: %s heads(%d) is not equal to the BIOS one(%d).\n", (char *)err, probed_heads, geometry->heads);
+		grub_printf ("\nWarning: %s heads(%d) is not equal to the BIOS one(%d).\n", err, probed_heads, geometry->heads);
 
 	geometry->heads	= probed_heads;
 
 	if (probed_sectors_per_track != geometry->sectors)
 	    if (debug > 1)
-		grub_printf ("\nWarning: %s sectors per track(%d) is not equal to the BIOS one(%d).\n", (char *)err, probed_sectors_per_track, geometry->sectors);
+		grub_printf ("\nWarning: %s sectors per track(%d) is not equal to the BIOS one(%d).\n", err, probed_sectors_per_track, geometry->sectors);
 
 	geometry->sectors = probed_sectors_per_track;
 
@@ -545,20 +615,20 @@ get_diskinfo (int drive, struct geometry *geometry)
 	{
 	    if (drive & 0x80)
 	    if (debug > 1)
-		grub_printf ("\nWarning: %s total sectors(%d) is greater than the BIOS one(%d).\nSome buggy BIOSes could hang when you access sectors exceeding the BIOS limit.\n", (char *)err, probed_total_sectors, total_sectors);
+		grub_printf ("\nWarning: %s total sectors(%d) is greater than the BIOS one(%d).\nSome buggy BIOSes could hang when you access sectors exceeding the BIOS limit.\n", err, probed_total_sectors, total_sectors);
 	    geometry->total_sectors	= probed_total_sectors;
 	}
 
 	if (drive & 0x80)
 	if (probed_total_sectors < total_sectors)
 	    if (debug > 1)
-		grub_printf ("\nWarning: %s total sectors(%d) is less than the BIOS one(%d).\n", (char *)err, probed_total_sectors, total_sectors);
+		grub_printf ("\nWarning: %s total sectors(%d) is less than the BIOS one(%d).\n", err, probed_total_sectors, total_sectors);
 
 failure_probe_boot_sector:
 	
 #ifndef GRUB_UTIL
 #if 1
-	if (!(geometry->flags & BIOSDISK_FLAG_LBA_EXTENSION) && ! ((*(char *)0x8205) & 0x08))
+	if (force_geometry_tune || (!(geometry->flags & BIOSDISK_FLAG_LBA_EXTENSION) && ! ((*(char *)0x8205) & 0x08)))
 	{
 		err = geometry->heads;
 		version = geometry->sectors;
@@ -610,11 +680,18 @@ failure_probe_boot_sector:
 	}
 	if (geometry->cylinders == 0)
 	{
-		geometry->cylinders = (geometry->total_sectors / geometry->heads / geometry->sectors);
+		unsigned long long tmp_sectors = geometry->total_sectors;
+
+		if (tmp_sectors > 0xFFFFFFFFULL)
+		    tmp_sectors = 0xFFFFFFFFULL;
+		geometry->cylinders = (((unsigned long)tmp_sectors) / geometry->heads / geometry->sectors);
 	}
 
 	if (geometry->cylinders == 0)
 		geometry->cylinders = 1;
+	total_sectors = geometry->cylinders * geometry->heads * geometry->sectors;
+	if (geometry->total_sectors < total_sectors)
+	    geometry->total_sectors = total_sectors;
 #endif	/* ! STAGE1_5 */
 
   /* backup the geometry into array hd_geom or fd_geom. */
@@ -649,10 +726,10 @@ failure_probe_boot_sector:
 
 	if (j == DRIVE_MAP_SIZE)	/* real drive */
 	{
-	    if (d >= 0x80 && d < 0x84)
+	    if (d >= 0x80 && d < 0x88)
 	    {
 		d -= 0x80;
-		if (hd_geom[d].sector_size != 512 || hd_geom[d].sectors <= 0 || hd_geom[d].sectors > 63 || hd_geom[d].heads > 256)
+		if (force_geometry_tune || hd_geom[d].sector_size != 512 || hd_geom[d].sectors <= 0 || hd_geom[d].sectors > 63 || hd_geom[d].heads > 256)
 		{
 			hd_geom[d].flags		= geometry->flags;
 			hd_geom[d].sector_size		= geometry->sector_size;
@@ -662,7 +739,7 @@ failure_probe_boot_sector:
 			hd_geom[d].cylinders		= geometry->cylinders;
 		}
 	    } else if (d < 4) {
-		if (fd_geom[d].sector_size != 512 || fd_geom[d].sectors <= 0 || fd_geom[d].sectors > 63 || fd_geom[d].heads > 256)
+		if (force_geometry_tune || fd_geom[d].sector_size != 512 || fd_geom[d].sectors <= 0 || fd_geom[d].sectors > 63 || fd_geom[d].heads > 256)
 		{
 			fd_geom[d].flags		= geometry->flags;
 			fd_geom[d].sector_size		= geometry->sector_size;

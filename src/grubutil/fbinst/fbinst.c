@@ -13,7 +13,7 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program.  If not, see http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "xdio.h"
 #include "keytab.h"
@@ -41,14 +42,18 @@
 
 char *progname = "fbinst";
 int verbosity = 0;
-char *fb_mbr_data = fb_mbr_rel;
+unsigned char *fb_mbr_data = fb_mbr_rel;
+int fb_mbr_size = sizeof (fb_mbr_rel);
 
 #define DEF_FAT32_SIZE		512 * 2048
 #define MIN_FAT16_SIZE		8400 + 1
 
 #define DEF_BASE_SIZE		63
-#define DEF_LIST_SIZE		1024
-#define DEF_PRI_SIZE		63 * 256
+#define MAX_LIST_SIZE		((0x80000 - 0x10000) >> 9)
+#define DEF_LIST_SIZE		(MAX_LIST_SIZE * 510)
+#define MIN_PRI_SIZE		63 * 256
+#define MAX_PRI_SIZE		65535
+#define MIN_NAND_ALIGN		255
 
 #define GLOB_BUF_SIZE		64
 
@@ -67,13 +72,12 @@ struct fb_mbr
 {
   uchar jmp_code;
   uchar jmp_ofs;
-  uchar boot_code[0x1a9];
-  uchar max_sec;		/* 0x1ab  */
-  uchar2 lba;			/* 0x1ac  */
-  uchar spt;			/* 0x1ae  */
-  uchar heads;			/* 0x1af  */
-  uchar2 boot_base;		/* 0x1b0  */
-  uchar2 boot_size;		/* 0x1b2  */
+  uchar boot_code[0x1ab];
+  uchar max_sec;		/* 0x1ad  */
+  uchar2 lba;			/* 0x1ae  */
+  uchar spt;			/* 0x1b0  */
+  uchar heads;			/* 0x1b1  */
+  uchar2 boot_base;		/* 0x1b2  */
   uchar4 fb_magic;		/* 0x1b4  */
   uchar mbr_table[0x46];	/* 0x1b8  */
   uchar2 end_magic;		/* 0x1fe  */
@@ -81,12 +85,14 @@ struct fb_mbr
 
 struct fb_data
 {
-  uchar2 menu_ofs;		/* 0x200  */
+  uchar2 boot_size;		/* 0x200  */
   uchar2 flags;			/* 0x202  */
   uchar ver_major;		/* 0x204  */
   uchar ver_minor;		/* 0x205  */
-  uchar4 pri_size;		/* 0x206  */
-  uchar4 ext_size;		/* 0x20a  */
+  uchar2 list_used;		/* 0x206  */
+  uchar2 list_size;		/* 0x208  */
+  uchar2 pri_size;		/* 0x20a  */
+  uchar4 ext_size;		/* 0x20c  */
 } PACK;
 
 struct fb_ar_data
@@ -94,9 +100,10 @@ struct fb_ar_data
   uchar4 ar_magic;		/* 0x200  */
   uchar ver_major;		/* 0x204  */
   uchar ver_minor;		/* 0x205  */
-  uchar4 pri_size;		/* 0x206  */
-  uchar4 ext_size;		/* 0x20a  */
-  uchar4 boot_size;		/* 0x20e  */
+  uchar2 list_used;		/* 0x206  */
+  uchar2 list_size;		/* 0x208  */
+  uchar2 pri_size;		/* 0x20a  */
+  uchar4 ext_size;		/* 0x20c  */
 } PACK;
 
 struct fat_bs16
@@ -161,11 +168,10 @@ struct fat_bs32
 struct fbm_file
 {
   uchar size;
-  uchar type;
+  uchar flag;
   uchar4 data_start;
   uchar4 data_size;
   time_t data_time;
-  uchar flag;
   char name[0];
 } PACK;
 
@@ -239,6 +245,50 @@ xmalloc (int size)
   return p;
 }
 
+void *
+xrealloc (void *p, int size)
+{
+  p = realloc (p, size);
+  if (! p)
+    quit ("not enough memory");
+
+  return p;
+}
+
+#define DOT_MIN_SIZE	(1 << 20)
+#define DOT_COUNT	20
+
+static uchar4 dot_size, dot_remain;
+
+void
+dot_init (uchar4 total_size)
+{
+  dot_remain = 0;
+  total_size /= DOT_COUNT;
+  dot_size = (total_size >= DOT_MIN_SIZE) ? total_size : 0;
+}
+
+void
+dot_print (uchar4 size)
+{
+  if (dot_size == 0)
+    return;
+
+  dot_remain += size;
+  while (dot_remain >= dot_size)
+    {
+      printf (".");
+      dot_remain -= dot_size;
+    }
+}
+
+void
+dot_fini (void)
+{
+  if (dot_size)
+    printf ("\n");
+}
+
 void
 help (void)
 {
@@ -258,6 +308,7 @@ help (void)
 	  "    --fat16\t\tFormat data partition as FAT16\n"
 	  "    --fat32\t\tFormat data partition as FAT32\n"
 	  "    --align,-a\t\tAlign to cluster boundary\n"
+	  "    --nalign,-n NUM\t\tNAND alignment\n"
 	  "    --unit-size,-u NUM\tUnit size for FAT16/FAT32 in sectors\n"
 	  "    --base,-b NUM\tSet base boot sector\n"
 	  "    --size,-s NUM\tSet size of data partition\n"
@@ -265,15 +316,20 @@ help (void)
 	  "    --extended,-e NUM\tSet extended data size\n"
 	  "    --list-size,-l NUM\tSet size of file list\n"
 	  "    --max-sectors NUM\tSet maximum number of sectors per read\n"
+	  "    --chs\t\tForce chs mode\n"
 	  "    --archive FILE\tInitialize fb using archive file\n"
 	  "  restore\t\tTry to restore fb mbr\n"
 	  "  update\t\tUpdate boot code\n"
 	  "  sync\t\t\tSynchronize disk information\n"
 	  "    --copy-bpb\t\tCopy bpb from the first partition\n"
-	  "    --clear-bpb\t\tClear bpb in the boot sector\n"
+	  "    --reset-bpb\t\tReset bpb to inital state\n"
+	  "    --clear-bpb\t\tClear bpb\n"
+	  "    --max-sectors NUM\tSet maximum number of sectors per read\n"
+	  "    --chs\t\tForce chs mode\n"
+	  "    --zip,-z\t\tFormat as USB-ZIP\n"
 	  "  info\t\t\tShow disk information\n"
 	  "  clear\t\t\tClear files\n"
-	  "  add NAME FILE\t\tAdd/update file item\n"
+	  "  add NAME [FILE]\tAdd/update file item\n"
 	  "    --extended,-e\tStore the file in extended data area\n"
 	  "    --syslinux,-s\tPatch syslinux boot file\n"
 	  "  add-menu NAME FILE\tAdd/update menu file\n"
@@ -284,7 +340,7 @@ help (void)
 	  "    --fill,-f NUM\tSet fill character for expansion\n"
 	  "  copy OLD NEW\t\tCopy file item\n"
 	  "  move OLD NEW\t\tMove file item\n"
-	  "  export NAME FILE\tExport file item\n"
+	  "  export NAME [FILE]\tExport file item\n"
 	  "  remove NAME\t\tRemove file item\n"
 	  "  cat NAME\t\tShow the content of text file\n"
 	  "  cat-menu NAME\t\tShow the content of menu file\n"
@@ -292,7 +348,11 @@ help (void)
 	  "  check\t\t\tCheck primary data area for inconsistency\n"
 	  "  save FILE\t\tSave to archive file\n"
 	  "    --list-size,-l NUM\tSet size of file list\n"
-	  "  load FILE\t\tLoad from archive file\n");
+	  "  load FILE\t\tLoad from archive file\n"
+	  "  create\t\tCreate archive file\n"
+	  "    --primary,-p NUM\tSet primary data size\n"
+	  "    --extended,-e NUM\tSet extended data size\n"
+	  "    --list-size,-l NUM\tSet size of file list\n");
 }
 
 void
@@ -310,29 +370,37 @@ list_devs (void)
       if (xd)
 	{
 	  unsigned long size;
+	  int s;
+	  char c;
+	  struct fb_mbr m;
+	  char *mark;
 
 	  size = xd_size (xd);
 	  if (size == XD_INVALID_SIZE)
-	    printf ("%s: can\'t get size\n", name);
+	    goto quit;
+
+	  if (xd_read (xd, (char *) &m, 1))
+	    goto quit;
+
+	  mark = ((m.end_magic == 0xaa55) &&
+		  (m.fb_magic == FB_MAGIC_LONG) &&
+		  (m.lba == 0)) ? " *" : "";
+
+	  if (size >= (3 << 20))
+	    {
+	      s = (size + (1 << 20)) >> 21;
+	      c = 'g';
+
+	    }
 	  else
 	    {
-	      int s;
-	      char c;
-
-	      if (size >= (3 << 20))
-		{
-		  s = (size + (1 << 20)) >> 21;
-		  c = 'g';
-
-		}
-	      else
-		{
-		  s = (size + (1 << 10)) >> 11;
-		  c = 'm';
-		}
-	      printf ("%s: %lu (%d%c)\n", name, size, s, c);
+	      s = (size + (1 << 10)) >> 11;
+	      c = 'm';
 	    }
 
+	  printf ("%s: %lu (%d%c)%s\n", name, size, s, c, mark);
+
+	quit:
 	  xd_close (xd);
 	}
     }
@@ -344,21 +412,22 @@ uchar4 fb_pri_size;
 uchar4 fb_part_ofs;
 int fb_total_size;
 int fb_boot_base;
-int fb_boot_size;
+int fb_list_start;
+int fb_list_sectors;
 int fb_list_size;
 int fb_list_tail;
 int fb_ar_mode;
 int fb_ar_size;
 
 void
-read_disk (xd_t *xd, char *buf, int size)
+read_disk (xd_t *xd, void *buf, int size)
 {
   if (xd_read (xd, buf, size))
     quit ("xd_read fails at offset %d, size %d", xd->ofs, size);
 }
 
 void
-write_disk (xd_t *xd, char *buf, int size)
+write_disk (xd_t *xd, void *buf, int size)
 {
   if (xd_write (xd, buf, size))
     quit ("xd_write fails at offset %d, size %d", xd->ofs, size);
@@ -492,7 +561,7 @@ format_fat16 (xd_t *xd, uchar4 ds, int unit_size, int is_align)
 
       i = ds - (pbs->nrs + ((pbs->nrd * 32) + pbs->bps - 1) / pbs->bps);
       i /= pbs->spc;
-      if (i > 65526)
+      if (i >= 65525)
 	quit ("unit size %d invalid for fat16", pbs->spc);
     }
 
@@ -593,7 +662,7 @@ format_fat32 (xd_t *xd, uchar4 ds, int unit_size, int is_align)
 
   i = ds - (uchar4) (pbs->nrs + ((pbs->nrd * 32) + pbs->bps - 1) / pbs->bps);
   i /= pbs->spc;
-  if ((i <= 65526) || (i >= 4177918))
+  if (i < 65525)
     quit ("unit size %d invalid for fat32", pbs->spc);
 
   write_disk (xd, buf, 3);
@@ -653,9 +722,12 @@ get_sector_size (char *s)
 }
 
 void
-sync_mbr (xd_t *xd, char *buf, int base, int copy_bpb)
+sync_mbr (xd_t *xd, uchar *buf, int base, int copy_bpb, int force)
 {
   int i;
+
+  if ((force) && (xd_lock (xd)))
+    quit ("can\'t lock disk");
 
   seek_disk (xd, 0);
   for (i = 0; i <= base; i++)
@@ -676,8 +748,8 @@ sync_mbr (xd_t *xd, char *buf, int base, int copy_bpb)
 	      start = *((uchar4 *) &buf[j + 8]);
 	      size = *((uchar4 *) &buf[j + 12]);
 
-	      lba2chs (start, &buf[j + 1]);
-	      lba2chs (start + size - 1, &buf[j + 5]);
+	      lba2chs (start, (uchar *) &buf[j + 1]);
+	      lba2chs (start + size - 1, (uchar *) &buf[j + 5]);
 	    }
 
 	  if (copy_bpb)
@@ -689,7 +761,7 @@ sync_mbr (xd_t *xd, char *buf, int base, int copy_bpb)
 }
 
 uchar4
-get_part_ofs (char *buf)
+get_part_ofs (uchar *buf)
 {
   int i;
   uchar4 min;
@@ -710,8 +782,67 @@ get_part_ofs (char *buf)
   return min;
 }
 
+void load_archive (xd_t *xd, int argc, char **argv);
+void read_header (xd_t *xd, int allow_ar);
+void write_header (xd_t *xd);
+
+void
+mem_copy (uchar *d, uchar *s, int size)
+{
+  int dir = 1;
+
+  if (s == d)
+    return;
+
+  if (s < d)
+    {
+      s += size - 1;
+      d += size - 1;
+      dir = -1;
+    }
+
+  while (size)
+    {
+      *d = *s;
+      s += dir;
+      d += dir;
+      size--;
+    }
+}
+
+void
+add_mark (uchar *buf, int sectors, int base, int size)
+{
+  int i;
+  uchar *p;
+
+  memset (buf + size, 0, (sectors << 9) - size);
+  p = buf + (sectors - 1) * 510;
+  for (i = sectors - 1; i >= 0; i--)
+    {
+      mem_copy (buf + i * 512, p, 510);
+      p -= 510;
+      *((uchar2 *) (buf + i * 512 + 510)) = base + i;
+    }
+}
+
+void
+remove_mark (uchar *buf, int sectors)
+{
+  int i;
+  uchar *p;
+
+  p = buf;
+  for (i = 0; i < sectors - 1; i++)
+    {
+      p += 510;
+      buf += 512;
+      mem_copy (p, buf, 510);
+    }
+}
+
 uchar *
-get_ar_header (int hd, int *list_size)
+get_ar_header (int hd)
 {
   uchar *buf;
   struct fb_ar_data *d1;
@@ -730,23 +861,34 @@ get_ar_header (int hd, int *list_size)
       (d1->ver_minor != d2->ver_minor))
     quit ("version number not match");
 
-  size = d1->boot_size << 9;
+  size = d1->list_size << 9;
   buf = xmalloc (size);
-  size -= 512;
-
-  memcpy (buf, global_buffer, 512);
-  if (read (hd, buf + 512, size) != size)
+  if (read (hd, buf, size) != size)
     quit ("file read fails");
 
-  if (list_size)
-    *list_size = d1->boot_size;
+  remove_mark (buf, d1->list_size);
 
   return buf;
 }
 
-void load_archive (xd_t *xd, int argc, char **argv);
-void read_header (xd_t *xd, int allow_ar);
-void write_header (xd_t *xd);
+void
+config_mbr (int max_sec, int chs_mode, int is_zip)
+{
+  struct fb_mbr *m1;
+
+  m1 = (struct fb_mbr *) global_buffer;
+  if (! max_sec)
+    max_sec = (m1->max_sec & 0x7f);
+  if (chs_mode)
+    max_sec |= 0x80;
+  m1->max_sec = max_sec;
+
+  if (is_zip)
+    {
+      global_buffer[0x26] = 0x29;
+      strcpy ((char *) &global_buffer[3], "MSWIN4.1");
+    }
+}
 
 void
 format_disk (xd_t *xd, int argc, char **argv)
@@ -768,6 +910,8 @@ format_disk (xd_t *xd, int argc, char **argv)
   int ext_size = 0;
   int total_size = 0;
   int max_sec = 0;
+  int chs_mode = 0;
+  int nand_align = MIN_NAND_ALIGN;
   char *ar_file = 0;
 
   for (i = 0; i < argc; i++)
@@ -793,8 +937,10 @@ format_disk (xd_t *xd, int argc, char **argv)
 
 	  i++;
 	  pri_size = get_sector_size (argv[i]);
-	  if (pri_size < DEF_PRI_SIZE)
+	  if (pri_size < MIN_PRI_SIZE)
 	    quit ("primary data size too small");
+	  if (pri_size > MAX_PRI_SIZE)
+	    quit ("primary data size too large");
 	}
       else if (! strcmp (argv[i], "--extended") ||
 	       ! strcmp (argv[i], "-e"))
@@ -859,6 +1005,18 @@ format_disk (xd_t *xd, int argc, char **argv)
 	  i++;
 	  ar_file = argv[i];
 	}
+      else if (! strcmp (argv[i], "--nalign") ||
+	       ! strcmp (argv[i], "-n"))
+	{
+	  if (i >= argc)
+	    quit ("no parameter for %s", argv[i]);
+
+	  i++;
+	  nand_align = strtoul (argv[i], 0, 0) - 1;
+	  if ((nand_align < MIN_NAND_ALIGN) ||
+	      (((nand_align + 1) & nand_align) != 0))
+	    quit ("invalid alignment value");
+	}
       else if (! strcmp (argv[i], "--unit-size") ||
 	       ! strcmp (argv[i], "-u"))
 	{
@@ -875,6 +1033,12 @@ format_disk (xd_t *xd, int argc, char **argv)
 
 	  i++;
 	  max_sec = strtoul (argv[i], 0, 0);
+	  if ((max_sec < 0) || (max_sec > 127))
+	    quit ("invalid max sectors value");
+	}
+      else if (! strcmp (argv[i], "--chs"))
+	{
+	  chs_mode = 1;
 	}
       else
 	quit ("invalid option %s for format", argv[i]);
@@ -884,14 +1048,15 @@ format_disk (xd_t *xd, int argc, char **argv)
 
   if (ar_file)
     {
-      int hd, ar_size;
-      struct fb_data *ar_data;
+      int hd;
+      struct fb_ar_data *ar_data;
 
       hd = open (ar_file, O_RDONLY | O_BINARY);
       if (hd < 0)
 	quit ("can\'t open file %s", ar_file);
 
-      ar_data = (struct fb_data *) get_ar_header (hd, &ar_size);
+      free (get_ar_header (hd));
+      ar_data = (struct fb_ar_data *) global_buffer;
       if (! pri_size)
 	pri_size = ar_data->pri_size;
 
@@ -899,38 +1064,33 @@ format_disk (xd_t *xd, int argc, char **argv)
 	ext_size = ar_data->ext_size;
 
       if (! list_size)
-	{
-	  int size;
-	  int ofs;
+	list_size = ar_data->list_size * 510;
 
-	  ofs = (data->menu_ofs & 0x1ff);
-	  size = (ofs + (ar_size << 9) - sizeof (struct fb_ar_data)) / 510;
-	  list_size = size * 510 - ofs;
-	}
-
-      free (ar_data);
       close (hd);
     }
 
   if (! pri_size)
-    pri_size = DEF_PRI_SIZE;
+    pri_size = MIN_PRI_SIZE;
 
   if (! list_size)
     list_size = DEF_LIST_SIZE;
+
+  list_size = (list_size + 509) / 510;
+  if (list_size > MAX_LIST_SIZE)
+    quit ("list too large");
 
   max_size = xd_size (xd);
   if (max_size == XD_INVALID_SIZE)
     quit ("can\'t get size");
 
-  total_size = (is_raw) ? base : ((pri_size + ext_size + 255) & ~255);
+  total_size = (is_raw) ? base :
+    ((pri_size + ext_size + nand_align) & ~nand_align);
   if (total_size >= max_size)
     quit ("the disk is too small");
 
   max_size -= total_size;
-  if (! part_size)
+  if ((! part_size) || (part_size > max_size))
     part_size = max_size;
-  else if (part_size > max_size)
-    quit ("size %s is too large", part_size);
 
   if (is_fat32 == -1)
     is_fat32 = (part_size >= DEF_FAT32_SIZE);
@@ -940,6 +1100,9 @@ format_disk (xd_t *xd, int argc, char **argv)
       if (! is_force)
 	quit ("--raw would destroy existing partiiton layout,\n"
 	      "use --force if you want to continue.");
+
+      if (xd_lock (xd))
+	quit ("can\'t lock disk");
 
       if (base)
 	{
@@ -1007,33 +1170,27 @@ format_disk (xd_t *xd, int argc, char **argv)
   m2 = (struct fb_mbr *) fb_mbr_data;
 
   memcpy (global_buffer, fb_mbr_data, OFS_mbr_table);
-  memcpy (&global_buffer[510], &fb_mbr_data[510], data->menu_ofs + 2);
 
+  m1->end_magic = 0xaa55;
   m1->boot_base = base;
-  m1->boot_size = data->menu_ofs >> 9;
-  m1->boot_size += ((data->menu_ofs & 0x1ff) + list_size + 509) / 510;
-  if (max_sec)
-    m1->max_sec = max_sec;
+
+  config_mbr (max_sec, chs_mode, is_zip);
+  sync_mbr (xd, global_buffer, base, 0, is_force);
+
+  i = (fb_mbr_size - 512 + 509) / 510;
+  memcpy (&global_buffer[512], &fb_mbr_data[512], fb_mbr_size - 512);
+  add_mark (&global_buffer[512], i, base + 1, fb_mbr_size - 512);
 
   data = (struct fb_data *) &global_buffer[512];
   data->pri_size = pri_size;
   data->ext_size = ext_size;
-
-  if (is_zip)
-    {
-      global_buffer[0x26] = 0x29;
-      strcpy (&global_buffer[3], "MSWIN4.1");
-    }
-
-  sync_mbr (xd, global_buffer, base, 0);
-
-  for (i = 1; i <= m1->boot_size; i++)
-    *(uchar2 *) &global_buffer[i * 512 + 510] = base + i;
-
-  write_disk (xd, &global_buffer[512], m1->boot_size);
+  data->list_used = 1;
+  data->list_size = list_size;
+  data->boot_size = i;
+  write_disk (xd, &global_buffer[512], i);
   memset (global_buffer, 0, sizeof (global_buffer));
 
-  i += base;
+  i += base + 1;
   while (i < pri_size)
     {
       int j, n;
@@ -1078,7 +1235,7 @@ restore_disk (xd_t *xd)
   int i;
 
   mbr = (struct fb_mbr *) global_buffer;
-  for (i = 0; i < DEF_BASE_SIZE; i++)
+  for (i = 0; i <= DEF_BASE_SIZE; i++)
     {
       read_disk (xd, (char *) mbr, 1);
       if ((mbr->end_magic == 0xaa55) && (mbr->fb_magic == FB_MAGIC_LONG) &&
@@ -1086,7 +1243,7 @@ restore_disk (xd_t *xd)
 	break;
     }
 
-  if (i == DEF_BASE_SIZE)
+  if (i > DEF_BASE_SIZE)
     quit ("can\'t find fb mbr");
 
   if (i)
@@ -1095,7 +1252,7 @@ restore_disk (xd_t *xd)
       read_disk (xd, &global_buffer[512], 1);
       memcpy (&mbr->mbr_table, &global_buffer[512 + OFS_mbr_table],
 	      0x200 - OFS_mbr_table);
-      sync_mbr (xd, (char *) mbr, i - 1, 0);
+      sync_mbr (xd, (uchar *) mbr, i - 1, 0, 0);
     }
 }
 
@@ -1104,15 +1261,15 @@ get_ar_size ()
 {
   int last_ofs, ofs;
 
-  ofs = ((struct fb_data *) fb_list)->menu_ofs;
-  last_ofs = 0;
+  ofs = 0;
+  last_ofs = -1;
   while (fb_list[ofs])
     {
       last_ofs = ofs;
       ofs += fb_list[ofs] + 2;
     }
 
-  if (last_ofs)
+  if (last_ofs >= 0)
     {
       struct fbm_file *m;
       int n;
@@ -1122,7 +1279,7 @@ get_ar_size ()
       return m->data_start + (m->data_size + n - 1) / n;
     }
   else
-    return fb_boot_size;
+    return fb_list_start + fb_list_sectors;
 }
 
 void
@@ -1135,6 +1292,8 @@ read_header (xd_t *xd, int allow_ar)
 
   m1 = (struct fb_mbr *) global_buffer;
   m2 = (struct fb_mbr *) fb_mbr_data;
+  d1 = (struct fb_data *) global_buffer;
+  memcpy (&global_buffer[512], global_buffer, 512);
   if (m1->fb_magic != m2->fb_magic)
     {
       if (((struct fb_ar_data *) global_buffer)->ar_magic == FB_AR_MAGIC_LONG)
@@ -1143,25 +1302,32 @@ read_header (xd_t *xd, int allow_ar)
 	    quit ("this command can\'t work with archive");
 
 	  fb_boot_base = -1;
-	  fb_boot_size = ((struct fb_ar_data *) global_buffer)->boot_size;
+	  fb_list_start = 1;
 	  fb_ar_mode = 1;
 	}
       else
-	quit ("fb mbr not detected");
+	{
+	  seek_disk (xd, DEF_BASE_SIZE);
+	  read_disk (xd, global_buffer, 1);
+	  quit ((m1->fb_magic != m2->fb_magic) ? "fb mbr not initialized" :
+		"fb mbr corrupted");
+	}
     }
   else
     {
       fb_boot_base = m1->boot_base;
-      fb_boot_size = m1->boot_size;
       fb_part_ofs = *((uchar4 *) &global_buffer[0x1c6]);
+      seek_disk (xd, fb_boot_base + 1);
+      read_disk (xd, global_buffer, 1);
+      fb_list_start = fb_boot_base + 1 + d1->boot_size;
     }
 
-  fb_list = xmalloc (fb_boot_size << 9);
+  fb_list_sectors = d1->list_size;
+  fb_list = xmalloc (fb_list_sectors << 9);
 
-  seek_disk (xd, fb_boot_base + 1);
-  read_disk (xd, fb_list, fb_boot_size);
+  seek_disk (xd, fb_list_start);
+  read_disk (xd, fb_list, fb_list_sectors);
 
-  d1 = (struct fb_data *) fb_list;
   d2 = (struct fb_data *) (fb_mbr_data + 512);
 
   if ((d1->ver_major != d2->ver_major) ||
@@ -1170,37 +1336,21 @@ read_header (xd_t *xd, int allow_ar)
 
   if (fb_ar_mode)
     {
-      fb_pri_size = fb_boot_size;
+      fb_pri_size = 1 + fb_list_sectors;
       fb_total_size = FB_AR_MAX_SIZE;
-
-      d1->menu_ofs = sizeof (struct fb_ar_data);
-      fb_list_size = fb_boot_size << 9;
     }
   else
     {
-      unsigned int i;
-      char *p;
-
       fb_pri_size = d1->pri_size;
       fb_total_size = d1->pri_size + d1->ext_size;
-
-      i = (d1->menu_ofs >> 9) + 1;
-      p = fb_list + i * 512 - 2;
-      for (; i < fb_boot_size; i++)
-	{
-	  memcpy (p, fb_list + i * 512, 510);
-	  p += 510;
-	}
-
-      fb_list_size = p - (char *) fb_list;
     }
 
-  fb_list_tail = d1->menu_ofs;
+  remove_mark (fb_list, fb_list_sectors);
+  fb_list_size = fb_list_sectors * 510;
+  fb_list_tail = 0;
+
   while (fb_list[fb_list_tail])
     {
-      if (fb_list[fb_list_tail + 1] != FBM_TYPE_FILE)
-	quit ("invalid file list");
-
       fb_list_tail += fb_list[fb_list_tail] + 2;
 
       if (fb_list_tail >= fb_list_size)
@@ -1215,43 +1365,28 @@ void
 write_header (xd_t *xd)
 {
   struct fb_data *data;
+  int ar_size;
 
-  memset (fb_list + fb_list_tail, 0, fb_list_size - fb_list_tail);
-
-  data = (struct fb_data *) fb_list;
-
-  if (! fb_ar_mode)
-    {
-      unsigned int i, n;
-      char *p;
-
-      n = (data->menu_ofs >> 9) + 1;
-      p = (fb_list + (fb_boot_size - 1) * 512 - (fb_boot_size - n) * 2);
-
-      for (i = fb_boot_size - 1; i >= n; i--)
-	{
-	  memcpy (fb_list + i * 512, p, 510);
-	  p -= 510;
-	  *((uchar2 *) (fb_list + i * 512 - 2)) = fb_boot_base + i;
-	}
-    }
-  else
-    data->menu_ofs = FB_AR_MAGIC_WORD;
+  ar_size = (fb_ar_mode) ? get_ar_size () : 0;
+  add_mark (fb_list, fb_list_sectors, fb_list_start, fb_list_tail);
 
   seek_disk (xd, fb_boot_base + 1);
-  write_disk (xd, fb_list, fb_boot_size);
+  read_disk (xd, global_buffer, 1);
+  data = (struct fb_data *) global_buffer;
+  data->list_used = (fb_list_tail / 510) + 1;
+  seek_disk (xd, fb_boot_base + 1);
+  write_disk (xd, global_buffer, 1);
+
+  seek_disk (xd, fb_list_start);
+  write_disk (xd, fb_list, fb_list_sectors);
 
 #ifdef WIN32
   if (fb_ar_mode)
     {
-      uchar4 size;
-
-      data->menu_ofs = sizeof (struct fb_ar_data);
-      size = get_ar_size ();
-      if ((size < fb_ar_size) && ((xd->flg & XDF_FILE) != 0) &&
+      if ((ar_size < fb_ar_size) && ((xd->flg & XDF_FILE) != 0) &&
 	  ((xd->flg & XDF_DISK) == 0))
 	{
-	  seek_disk (xd, size);
+	  seek_disk (xd, ar_size);
 	  SetEndOfFile ((HANDLE) xd->num);
 	}
     }
@@ -1263,20 +1398,15 @@ update_header (xd_t *xd)
 {
   uchar4 i;
   struct fb_mbr *m2;
-  struct fb_data *d1, *d2;
-  int boot_size, menu_ofs;
+  struct fb_data *d2;
+  int boot_size;
 
   m2 = (struct fb_mbr *) fb_mbr_data;
   d2 = (struct fb_data *) &fb_mbr_data[512];
-  d1 = (struct fb_data *) fb_list;
 
-  menu_ofs = d1->menu_ofs;
-  boot_size = d2->menu_ofs >> 9;
-  boot_size += ((d2->menu_ofs & 0x1ff) +
-		fb_list_tail - menu_ofs + 1 + 509) / 510;
-
-  if (boot_size > fb_boot_size)
-    quit ("not enough space for menu, you need to use format command");
+  boot_size = (fb_mbr_size - 512 + 509) / 510;
+  if (fb_boot_base + 1 + boot_size > fb_list_start)
+    quit ("not enough space, you need to use format command");
 
   seek_disk (xd, 0);
   for (i = 0; i <= fb_boot_base; i++)
@@ -1296,24 +1426,15 @@ update_header (xd_t *xd)
       write_disk (xd, global_buffer, 1);
     }
 
-  memset (global_buffer, 0, fb_boot_size * 512);
-  memcpy (global_buffer, &fb_mbr_data[512], d2->menu_ofs);
-  memcpy (global_buffer + 2, fb_list + 2, sizeof (struct fb_data) - 2);
+  memset (global_buffer, 0, sizeof (global_buffer));
+  read_disk (xd, global_buffer, 1);
+  memcpy (&global_buffer[sizeof (struct fb_data)],
+	  &fb_mbr_data[512 + sizeof (struct fb_data)],
+	  fb_mbr_size - 512 - sizeof (struct fb_data));
 
-  memcpy (&global_buffer[d2->menu_ofs], fb_list + menu_ofs,
-	  fb_list_tail - menu_ofs);
-
-  fb_list_tail += d2->menu_ofs - menu_ofs;
-  memcpy (fb_list, global_buffer, fb_list_tail);
-
-  for (i = 0; i < (d2->menu_ofs >> 9); i++)
-    *((uchar2 *) (fb_list + i * 512 + 510)) =
-      fb_boot_base + 1 + i;
-
-
-
-  *((uchar2 *) (fb_list + fb_boot_size * 512 - 2)) =
-    fb_boot_base + fb_boot_size;
+  add_mark (global_buffer, boot_size, fb_boot_base + 1, fb_mbr_size - 512);
+  seek_disk (xd, fb_boot_base + 1);
+  write_disk (xd, global_buffer, boot_size);
 }
 
 void
@@ -1324,6 +1445,9 @@ sync_disk (xd_t *xd, int argc, char **argv)
   int copy_bpb = -1;
   int bpb_size = 0;
   int i, jmp_ofs;
+  int is_zip = 0;
+  int max_sec = 0;
+  int chs_mode = 0;
 
   for (i = 0; i < argc; i++)
     {
@@ -1331,6 +1455,10 @@ sync_disk (xd_t *xd, int argc, char **argv)
 	break;
 
       if (! strcmp (argv[i], "--copy-bpb"))
+	{
+	  copy_bpb = 2;
+	}
+      else if (! strcmp (argv[i], "--reset-bpb"))
 	{
 	  copy_bpb = 1;
 	}
@@ -1346,6 +1474,25 @@ sync_disk (xd_t *xd, int argc, char **argv)
 	  i++;
 	  bpb_size = strtoul (argv[i], 0, 0);
 	}
+      else if (! strcmp (argv[i], "--zip") ||
+	       ! strcmp (argv[i], "-z"))
+	{
+	  is_zip = 1;
+	}
+      else if (! strcmp (argv[i], "--max-sectors"))
+	{
+	  if (i >= argc)
+	    quit ("no parameter for %s", argv[i]);
+
+	  i++;
+	  max_sec = strtoul (argv[i], 0, 0);
+	  if ((max_sec < 0) || (max_sec > 127))
+	    quit ("invalid max sectors value");
+	}
+      else if (! strcmp (argv[i], "--chs"))
+	{
+	  chs_mode = 1;
+	}
       else
 	quit ("invalid option %s for sync", argv[i]);
     }
@@ -1357,7 +1504,7 @@ sync_disk (xd_t *xd, int argc, char **argv)
   read_disk (xd, buf, 1);
 
   jmp_ofs = global_buffer[1];
-  if (copy_bpb == 1)
+  if (copy_bpb == 2)
     {
       struct fat_bs16 *bs;
       uchar4 ts;
@@ -1376,45 +1523,93 @@ sync_disk (xd_t *xd, int argc, char **argv)
 	bs->ts16 = (uchar2) ts;
       else
 	bs->ts32 = ts;
+      is_zip = 0;
     }
-  else if (copy_bpb == 0)
-    memset (&global_buffer[2], 0, jmp_ofs);
+  else if (copy_bpb >= 0)
+    {
+      memset (&global_buffer[2], 0, jmp_ofs);
+      if (copy_bpb)
+	{
+	  global_buffer[0x10] = 2;
+	  global_buffer[0x18] = 0x3f;
+	  global_buffer[0x1a] = 0xff;
+	  global_buffer[0x24] = 0x80;
+	}
+    }
 
   if ((bpb_size) && (bpb_size < jmp_ofs + 2))
     memset (&global_buffer[bpb_size], 0, jmp_ofs + 2 - bpb_size);
 
-  sync_mbr (xd, global_buffer, fb_boot_base, copy_bpb == 1);
+  config_mbr (max_sec, chs_mode, is_zip);
+  sync_mbr (xd, global_buffer, fb_boot_base, copy_bpb == 1, 0);
 }
 
 void
-print_info ()
+print_info (xd_t *xd)
 {
   int o;
   struct fb_data *data;
   uchar4 s1, s2, b;
+  char buf[256], *p;
 
-  data = (struct fb_data *) fb_list;
+  seek_disk (xd, fb_boot_base + 1);
+  read_disk (xd, global_buffer, 1);
+  data = (struct fb_data *) global_buffer;
 
   printf ("version: %d.%d\n", data->ver_major, data->ver_minor);
+  p = buf;
+  *p = 0;
   if (! fb_ar_mode)
     {
+      int chs;
+      struct fb_mbr *mbr = (struct fb_mbr *) &global_buffer[512];
+      char *s;
+
       printf ("base boot sector: %d\n", fb_boot_base);
-      printf ("extra data size: %d\n", fb_boot_size);
-      printf ("primary data size: %lu\n", data->pri_size);
+      printf ("boot code size: %d\n", data->boot_size);
+      printf ("primary data size: %u\n", data->pri_size);
       printf ("extended data size: %lu\n", data->ext_size);
-      printf ("menu offset: 0x%x\n", data->menu_ofs);
+
+      chs = mbr->max_sec;
+      if (chs & 0x80)
+	p += sprintf (p, " --chs");
+      chs &= 0x7f;
+      if (chs != 63)
+	p += sprintf (p, " --max-sectors %d", chs);
+      printf ("debug version: %s\n",
+	      (global_buffer[512 + 0x1a8]) ? "yes" : "no");
+
+      if (global_buffer[512 + 0xd])
+	s = "copy";
+      else
+	{
+	  s = (global_buffer[512 + 0x18]) ? "init" : "zero";
+	  if (global_buffer[512 + 0x26] == 0x29)
+	    p += sprintf (p, " --zip");
+	}
+      printf ("bpb status: %s\n", s);
     }
   else
     {
-      printf ("file list size: %d\n", fb_boot_size);
-      printf ("original primary data size: %ld\n", data->pri_size);
-      printf ("original extended data size: %ld\n", data->ext_size);
+      printf ("file list size: %d\n", fb_list_sectors);
+      printf ("original primary data size: %u\n", data->pri_size);
+      printf ("original extended data size: %lu\n", data->ext_size);
       printf ("total sectors: %d\n", fb_ar_size);
     }
 
+  if (data->pri_size != MIN_PRI_SIZE)
+    p += sprintf (p, " --primary %d", data->pri_size);
+  if (data->ext_size)
+    p += sprintf (p, " --extended %ld", data->ext_size);
+  if (data->list_size * 510 != DEF_LIST_SIZE)
+    p += sprintf (p, " --list-size %d", data->list_size * 510);
+  printf ("format options:%s\n", buf);
+  printf ("file list size: %d\n", data->list_size);
+  printf ("file list used: %d\n", data->list_used);
+
   printf ("files:\n");
-  o = data->menu_ofs;
-  b = fb_boot_base + 1 + fb_boot_size;
+  o = 0;
+  b = fb_list_start + fb_list_sectors;
   s1 = 0;
   s2 = 0;
   while (fb_list[o])
@@ -1465,20 +1660,28 @@ print_info ()
 
   if (! fb_ar_mode)
     {
+      unsigned long long sz;
+
       if (b != fb_total_size)
 	printf ("  1*   0x%lx 0x%lx\n", b, fb_total_size - b);
 
       printf ("primary area free space: %ld\n",
-	      (fb_pri_size - fb_boot_base - 1 - fb_boot_size - s1) * 510);
-      printf ("extended area free space: %ld\n",
-	      (data->ext_size - s2) * 512);
+	      (fb_pri_size - fb_list_start - fb_list_sectors - s1) * 510);
+      sz = data->ext_size - s2;
+      sz <<= 9;
+#ifdef WIN32
+      printf ("extended area free space: %I64u\n", sz);
+#else
+      printf ("extended area free space: %llu\n", sz);
+#endif
     }
 }
 
 void
 clear_menu ()
 {
-  fb_list_tail = ((struct fb_data *) fb_list)->menu_ofs;
+  fb_list_tail = 0;
+  fb_list[0] = 0;
 }
 
 int
@@ -1518,10 +1721,10 @@ find_space (uchar4* start, uchar4 size, int is_ext)
   int ofs;
   uchar4 begin, count;
 
-  begin = fb_boot_base + 1 + fb_boot_size;
+  begin = fb_list_start + fb_list_sectors;
   count = (size + 509) / 510;
 
-  ofs = ((struct fb_data *) fb_list)->menu_ofs;
+  ofs = 0;
   while (fb_list[ofs])
     {
       struct fbm_file *m;
@@ -1561,13 +1764,13 @@ find_file (char *name)
   int ofs;
 
   name = get_name (name);
-  ofs = ((struct fb_data *) fb_list)->menu_ofs;
+  ofs = 0;
   while (fb_list[ofs])
     {
       struct fbm_file *m;
 
       m = (struct fbm_file *) (fb_list + ofs);
-      if (! stricmp (m->name, name))
+      if (! strcasecmp (m->name, name))
 	return m;
 
       ofs += fb_list[ofs] + 2;
@@ -1615,7 +1818,6 @@ alloc_file (char *in_name, uchar4 *start, uchar4 size, int is_ext, time_t tm)
 
   m = (struct fbm_file *) (fb_list + ofs);
   m->size = len - 2;
-  m->type = FBM_TYPE_FILE;
   m->data_start = *start;
   m->data_size = size;
   m->data_time = tm;
@@ -1696,7 +1898,7 @@ cpy_file (xd_t *xd, char *name, uchar4 size,
 }
 
 void
-save_file_data (xd_t *xd, struct fbm_file *m, int hd)
+save_file_data (xd_t *xd, struct fbm_file *m, int hd, int print_dot)
 {
   uchar4 start, size;
   int n;
@@ -1704,11 +1906,13 @@ save_file_data (xd_t *xd, struct fbm_file *m, int hd)
   start = m->data_start;
   seek_disk (xd, start);
   size = m->data_size;
+  if (print_dot > 0)
+    dot_init (size);
   n = (start >= fb_pri_size) ? 512 : 510;
   while (size)
     {
       uchar4 nb, ns, i;
-      char *p;
+      uchar *p;
 
       nb = (size > GLOB_BUF_SIZE * n) ? GLOB_BUF_SIZE * n : size;
       ns = (nb + n - 1) / n;
@@ -1734,9 +1938,49 @@ save_file_data (xd_t *xd, struct fbm_file *m, int hd)
 	}
 
       write_disk (xd, global_buffer, ns);
+      if (print_dot)
+	dot_print (nb);
       size -= nb;
     }
+  if (print_dot > 0)
+    dot_fini ();
 }
+
+static uchar *
+read_input (uchar4 *size)
+{
+  uchar *result = 0;
+  int hd, pos = 0;
+
+  hd = fileno (stdin);
+#ifdef WIN32
+  setmode (hd, O_BINARY);
+#endif
+
+  while (1)
+    {
+      int n;
+
+      n = read (hd, global_buffer, sizeof (global_buffer));
+      if (n < 0)
+	quit ("read stdin fails");
+
+      if (n == 0)
+	break;
+
+      result = xrealloc (result, pos + n + 512);
+      memcpy (result + pos, global_buffer, n);
+      pos += n;
+    }
+
+  close (hd);
+  *size = pos;
+  memset (result + pos, 0, 512);
+  return result;
+}
+
+struct fbm_file *
+save_buff (xd_t *xd, char *in_name, uchar *buf, uchar4 size, int is_ext);
 
 struct fbm_file *
 save_file (xd_t *xd, char *in_name, char *name, int is_ext)
@@ -1745,6 +1989,17 @@ save_file (xd_t *xd, char *in_name, char *name, int is_ext)
   int hd;
   uchar4 start, size;
   struct fbm_file *m;
+
+  if (! name)
+    {
+      uchar *p;
+
+      p = read_input (&size);
+      if (! p)
+	quit ("no input");
+
+      return save_buff (xd, in_name, p, size, is_ext);
+    }
 
   hd = open (name, O_RDONLY | O_BINARY);
   if (hd < 0)
@@ -1759,7 +2014,7 @@ save_file (xd_t *xd, char *in_name, char *name, int is_ext)
 
   m = alloc_file (in_name, &start, size, is_ext, st.st_mtime);
 
-  save_file_data (xd, m, hd);
+  save_file_data (xd, m, hd, 1);
 
   close (hd);
 
@@ -1767,13 +2022,15 @@ save_file (xd_t *xd, char *in_name, char *name, int is_ext)
 }
 
 void
-load_file_data (xd_t *xd, struct fbm_file *m, int hd)
+load_file_data (xd_t *xd, struct fbm_file *m, int hd, int print_dot)
 {
   int n;
   uchar4 size;
 
   seek_disk (xd, m->data_start);
   size = m->data_size;
+  if (print_dot > 0)
+    dot_init (size);
   n = (m->data_start >= fb_pri_size) ? 512 : 510;
   while (size)
     {
@@ -1801,7 +2058,38 @@ load_file_data (xd_t *xd, struct fbm_file *m, int hd)
 	    }
 	}
 
+      if (print_dot)
+	dot_print (nb);
       size -= nb;
+    }
+  if (print_dot > 0)
+    dot_fini ();
+}
+
+void
+create_dir (char *path)
+{
+  char *p;
+
+  p = path;
+  if (p[0] == '/')
+    p++;
+
+  for (; *p; p++)
+    {
+      if ((*p == '/') || (*p == '\\'))
+	{
+	  char c;
+
+	  c = *p;
+	  *p = 0;
+#ifdef WIN32
+	  mkdir (path);
+#else
+	  mkdir (path, 0777);
+#endif
+	  *p = c;
+	}
     }
 }
 
@@ -1815,47 +2103,60 @@ load_file (xd_t *xd, char *in_name, char *name)
   if (! m)
     quit ("file %s not found", in_name);
 
-  hd = open (name, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, 0666);
+  if (! name)
+    {
+      hd = fileno (stdout);
+#ifdef WIN32
+      setmode (hd, O_BINARY);
+#endif
+    }
+  else
+    {
+      create_dir (name);
+      hd = open (name, O_RDWR | O_CREAT | O_TRUNC | O_BINARY, 0666);
+    }
   if (hd < 0)
     quit ("can\'t write to file %s", name);
 
-  load_file_data (xd, m, hd);
+  load_file_data (xd, m, hd, name != 0);
 
   close (hd);
 }
 
-void
-save_buff (xd_t *xd, char *in_name, uchar4 size, int is_ext)
+struct fbm_file *
+save_buff (xd_t *xd, char *in_name, uchar *buf, uchar4 size, int is_ext)
 {
   uchar4 start;
+  struct fbm_file *m;
 
-  alloc_file (in_name, &start, size, 0, time (0));
+  m = alloc_file (in_name, &start, size, 0, time (0));
 
   seek_disk (xd, start);
   if (start >= fb_pri_size)
     {
-      write_disk (xd, global_buffer, (size + 511) >> 9);
+      write_disk (xd, buf, (size + 511) >> 9);
     }
   else
     {
       int ns;
-      char *p;
 
-      p = global_buffer;
       ns = (size + 509) / 510;
       while (ns)
 	{
 	  uchar2 saved;
 
-	  saved = *((uchar2 *) (p + 510));
-	  *((uchar2 *) (p + 510)) = start;
-	  write_disk (xd, p, 1);
-	  *((uchar2 *) (p + 510)) = saved;
+	  saved = *((uchar2 *) (buf + 510));
+	  *((uchar2 *) (buf + 510)) = start;
+	  write_disk (xd, buf, 1);
+	  *((uchar2 *) (buf + 510)) = saved;
 
+	  buf += 510;
 	  start++;
 	  ns--;
 	}
     }
+
+  return m;
 }
 
 int
@@ -1878,7 +2179,7 @@ load_buff (xd_t *xd, char *in_name)
   else
     {
       int ns;
-      char *p;
+      uchar *p;
 
       p = global_buffer;
       ns = (m->data_size + 509) / 510;
@@ -1900,8 +2201,10 @@ syslinux_patch (xd_t *xd, struct fbm_file *m)
 {
   int dw, i;
   uchar4 start, cs, *p;
-  char *pa;
-  int ns;
+  uchar *pa;
+  uchar2 *ps, *pw;
+  uchar4 *pc;
+  int ns, ver;
 
   m->flag |= FBF_FLAG_SYSLINUX;
 
@@ -1912,29 +2215,55 @@ syslinux_patch (xd_t *xd, struct fbm_file *m)
   seek_disk (xd, m->data_start);
   read_disk (xd, global_buffer, ns);
 
-  start = m->data_start + 1;
-  *((uchar4 *) &global_buffer[0x1f8]) = start - fb_part_ofs;
-  *((uchar2 *) &global_buffer[0x1fe]) = 0xaa55;
+  if (memcmp ((char *) &global_buffer[0x202], "SYSLINUX", 8))
+    quit ("not a valid ldlinux.bin");
 
   pa = &global_buffer[0x200];
   while ((*((uchar4 *) pa) != LDLINUX_MAGIC) &&
-	 (pa < (char *) &global_buffer[0x400]))
+	 (pa < (uchar *) &global_buffer[0x400]))
     pa += 4;
 
-  if (pa >= (char *) &global_buffer[0x400])
+  if (pa >= (uchar *) &global_buffer[0x400])
     quit ("syslinux signature not found");
 
-  dw = (m->data_size - 512) >> 2;
-  pa += 8;
-  *((uchar2 *) pa) = dw;
+  start = m->data_start + 1 - fb_part_ofs;
+  ver = global_buffer[0x20b] - '0';
+  if (ver == 3)
+    {
+      *((uchar4 *) &global_buffer[0x1f8]) = start;
+      *((uchar2 *) &global_buffer[0x1fe]) = 0xaa55;
 
-  p = (uchar4 *) (pa + 8);
-  memset (p, 0, 64 * 4);
+      pw = (uchar2 *) (pa + 8);
+      ps = (uchar2 *) (pa + 10);
+      pc = (uchar4 *) (pa + 12);
+      p = (uchar4 *) (pa + 16);
+    }
+  else if (ver == 4)
+    {
+      int ofs, epa_ofs;
+
+      epa_ofs = *((uchar2 *) (pa + 22));
+      ofs = *((uchar2 *) &global_buffer[0x200 + epa_ofs + 14]);
+      *((uchar4 *) &global_buffer[ofs]) = start;
+      ofs = *((uchar2 *) &global_buffer[0x200 + epa_ofs + 16]);
+      *((uchar4 *) &global_buffer[ofs]) = 0xffffffff;
+
+      pw = (uchar2 *) (pa + 12);
+      ps = (uchar2 *) (pa + 8);
+      pc = (uchar4 *) (pa + 16);
+      ofs = *((uchar2 *) &global_buffer[0x200 + epa_ofs + 10]);
+      p = (uchar4 *) &global_buffer[0x200 + ofs];
+    }
+  else
+    quit ("invalid ldlinux.bin version %d", ver);
+
+  dw = (m->data_size - 512) >> 2;
+  *pw = dw;
 
 #if SYSLINUX_FULL_LOAD
   start++;
   ns -= 2;
-  *((uchar2 *) (pa + 2)) = ns;
+  *ps = ns;
   while (ns)
     {
       *p = start - fb_part_ofs;
@@ -1943,15 +2272,15 @@ syslinux_patch (xd_t *xd, struct fbm_file *m)
       p++;
     }
 #else
-  *((uchar2 *) (pa + 2)) = 0;
+  *ps = (ver == 3) ? 0 : 1;
 #endif
 
-  *((uchar4 *) (pa + 4)) = 0;
+  *pc = 0;
   cs = LDLINUX_MAGIC;
   for (i = 0, p = (uchar4 *) &global_buffer[0x200]; i < dw; i++, p++)
     cs -= *p;
 
-  *((uchar4 *) (pa + 4)) = cs;
+  *pc = cs;
   seek_disk (xd, m->data_start);
   write_disk (xd, global_buffer, 2);
 }
@@ -1987,10 +2316,10 @@ add_file (xd_t *xd, int argc, char **argv)
   argc -= i;
   argv += i;
 
-  if (argc < 2)
+  if (argc < 1)
     quit ("not enough parameters");
 
-  m = save_file (xd, argv[0], argv[1], is_ext);
+  m = save_file (xd, argv[0], (argc < 2) ? 0 : argv[1], is_ext);
   if (is_syslinux)
     syslinux_patch (xd, m);
 }
@@ -2008,7 +2337,9 @@ add_item_menu (int ofs, int argc, char **argv)
   size = sizeof (struct fbm_menu);
   if ((! strcmp (argv[1], "grldr")) ||
       (! strcmp (argv[1], "syslinux")) ||
-      (! strcmp (argv[1], "msdos")))
+      (! strcmp (argv[1], "msdos")) ||
+      (! strcmp (argv[1], "freedos")) ||
+      (! strcmp (argv[1], "chain")))
     {
       if (argc < 3)
 	quit ("not enough parameters");
@@ -2025,6 +2356,14 @@ add_item_menu (int ofs, int argc, char **argv)
 
 	case 'm':
 	  type = FBS_TYPE_MSDOS;
+	  break;
+
+	case 'f':
+	  type = FBS_TYPE_FREEDOS;
+	  break;
+
+	case 'c':
+	  type = FBS_TYPE_CHAIN;
 	  break;
 	}
       size += strlen (get_name (argv[2])) + 1;
@@ -2066,6 +2405,8 @@ add_item_menu (int ofs, int argc, char **argv)
     case FBS_TYPE_GRLDR:
     case FBS_TYPE_SYSLINUX:
     case FBS_TYPE_MSDOS:
+    case FBS_TYPE_FREEDOS:
+    case FBS_TYPE_CHAIN:
       strcpy (m->name, get_name (argv[2]));
       break;
 
@@ -2287,7 +2628,7 @@ parse_line (char *line, char ***args)
 
       if (n == max)
 	{
-	  v = realloc (v, max + PARSE_LINE_ARGS_STEP);
+	  v = realloc (v, (max + PARSE_LINE_ARGS_STEP) * sizeof (v[0]));
 	  if (! v)
 	    quit ("not enough memory");
 	  max += PARSE_LINE_ARGS_STEP;
@@ -2388,7 +2729,7 @@ add_menu (xd_t *xd, int argc, char **argv)
     }
 
   global_buffer[ofs] = 0;
-  save_buff (xd, argv[0], ofs + 1, 0);
+  save_buff (xd, argv[0], global_buffer, ofs + 1, 0);
 }
 
 void
@@ -2517,10 +2858,10 @@ move_file (xd_t *xd, int argc, char **argv)
 void
 export_file (xd_t *xd, int argc, char **argv)
 {
-  if (argc < 2)
+  if (argc < 1)
     quit ("not enough parameters");
 
-  load_file (xd, argv[0], argv[1]);
+  load_file (xd, argv[0], (argc < 2) ? 0 : argv[1]);
 }
 
 void
@@ -2543,7 +2884,7 @@ cat_file (xd_t *xd, int argc, char **argv)
 
   len = load_buff (xd, argv[0]);
   global_buffer[len] = 0;
-  puts (global_buffer);
+  puts ((char *) global_buffer);
 }
 
 void
@@ -2585,6 +2926,12 @@ cat_menu (xd_t *xd, int argc, char **argv)
 		}
 	      case FBS_TYPE_MSDOS:
 		printf ("msdos \"%s\"\n", m->name);
+		break;
+	      case FBS_TYPE_FREEDOS:
+		printf ("freedos \"%s\"\n", m->name);
+		break;
+	      case FBS_TYPE_CHAIN:
+		printf ("chain \"%s\"\n", m->name);
 		break;
 	      default:
 		quit ("invalid system type %d", m->sys_type);
@@ -2650,8 +2997,8 @@ pack_disk (xd_t *xd)
   uchar4 b;
   int ofs;
 
-  b = fb_boot_base + 1 + fb_boot_size;
-  ofs = ((struct fb_data *) fb_list)->menu_ofs;
+  b = fb_list_start + fb_list_sectors;
+  ofs = 0;
   while (fb_list[ofs])
     {
       struct fbm_file *m;
@@ -2715,8 +3062,9 @@ save_archive (xd_t *xd, int argc, char **argv)
 {
   uchar *buf;
   int i, hd, o1, o2, start;
-  int list_size;
+  int list_size, list_sectors;
   struct fb_ar_data *data;
+  uchar4 total_size;
 
   list_size = 0;
   for (i = 0; i < argc; i++)
@@ -2744,22 +3092,24 @@ save_archive (xd_t *xd, int argc, char **argv)
     quit ("not enough parameters");
 
   if (! list_size)
-    list_size = fb_list_size - ((struct fb_data *) fb_list)->menu_ofs;
+    list_size = fb_list_size;
 
-  list_size = (list_size + sizeof (struct fb_ar_data) + 511) & ~511;
-  start = (list_size >> 9);
+  list_sectors = (list_size + 509) / 510;
+  list_size = list_sectors * 510;
+  buf = xmalloc (list_sectors << 9);
 
-  buf = xmalloc (list_size);
-  data = (struct fb_ar_data *) buf;
+  memset (global_buffer, 0, 512);
+  data = (struct fb_ar_data *) global_buffer;
   data->ar_magic = FB_AR_MAGIC_LONG;
   data->ver_major = VER_MAJOR;
   data->ver_minor = VER_MINOR;
-  data->pri_size = ((struct fb_data *) fb_list)->pri_size;
-  data->ext_size = ((struct fb_data *) fb_list)->ext_size;
-  data->boot_size = start;
+  data->pri_size = fb_pri_size;
+  data->ext_size = fb_total_size - fb_pri_size;
+  data->list_size = list_sectors;
+  start = 1 + list_sectors;
 
-  o1 = ((struct fb_data *) fb_list)->menu_ofs;
-  o2 = sizeof (struct fb_ar_data);
+  o1 = o2 = 0;
+  total_size = 0;
   while (fb_list[o1])
     {
       struct fbm_file *m1, *m2;
@@ -2774,29 +3124,33 @@ save_archive (xd_t *xd, int argc, char **argv)
       m2->data_start = start;
 
       start += (m1->data_size + 511) >> 9;
+      total_size += m1->data_size;
       o1 += fb_list[o1] + 2;
       o2 += buf[o2] + 2;
     }
 
-  memset (buf + o2, 0, list_size - o2);
+  data->list_used = (o2 / 510) + 1;
+  add_mark (buf, list_sectors, 1, o2);
 
   hd = open (argv[0], O_RDWR | O_CREAT | O_TRUNC | O_BINARY, 0666);
   if (hd < 0)
     quit ("can\'t write to file %s", argv[0]);
 
-  if (write (hd, buf, list_size) != list_size)
+  if ((write (hd, global_buffer, 512) != 512) |
+      (write (hd, buf, list_sectors * 512) != list_sectors * 512))
     quit ("file write fails");
 
   free (buf);
 
-  o1 = ((struct fb_data *) fb_list)->menu_ofs;
+  dot_init (total_size);
+  o1 = 0;
   while (fb_list[o1])
     {
       struct fbm_file *m;
       int n;
 
       m = (struct fbm_file *) (fb_list + o1);
-      load_file_data (xd, m, hd);
+      load_file_data (xd, m, hd, -1);
       n = m->data_size & 511;
       if (n)
 	{
@@ -2808,6 +3162,7 @@ save_archive (xd_t *xd, int argc, char **argv)
 
       o1 += fb_list[o1] + 2;
     }
+  dot_fini ();
 
   close (hd);
 }
@@ -2817,6 +3172,7 @@ load_archive (xd_t *xd, int argc, char **argv)
 {
   uchar *buf;
   int hd, ofs;
+  uchar4 total_size;
 
   if (argc < 1)
     quit ("not enough parameters");
@@ -2825,35 +3181,113 @@ load_archive (xd_t *xd, int argc, char **argv)
   if (hd < 0)
     quit ("can\'t open file %s", argv[0]);
 
-  buf = get_ar_header (hd, 0);
-  ofs = sizeof (struct fb_ar_data);
+  buf = get_ar_header (hd);
+  total_size = 0;
+  ofs = 0;
+  while (buf[ofs])
+    {
+      struct fbm_file *m1;
+      m1 = (struct fbm_file *) (buf + ofs);
+      total_size += m1->data_size;
+      ofs += buf[ofs] + 2;
+    }
+
+  dot_init (total_size);
+  ofs = 0;
   while (buf[ofs])
     {
       struct fbm_file *m1, *m2;
       uchar4 start;
-      int n;
 
       m1 = (struct fbm_file *) (buf + ofs);
       m2 = alloc_file (m1->name, &start, m1->data_size,
 		       m1->flag & FBF_FLAG_EXTENDED, m1->data_time);
-      save_file_data (xd, m2, hd);
+      lseek (hd, m1->data_start << 9, SEEK_SET);
+      save_file_data (xd, m2, hd, -1);
       m2->flag = m1->flag;
       if (m1->flag & FBF_FLAG_SYSLINUX)
 	syslinux_patch (xd, m2);
 
-      n = m1->data_size & 511;
-      if (n)
-	{
-	  n = 512 - n;
-	  if (read (hd, global_buffer, n) != n)
-	    quit ("file read fails");
-	}
-
       ofs += buf[ofs] + 2;
     }
+  dot_fini ();
 
   free (buf);
   close (hd);
+}
+
+void
+create_archive (xd_t *xd, int argc, char **argv)
+{
+  int i;
+  int pri_size = MIN_PRI_SIZE;
+  int ext_size = 0;
+  int list_size = DEF_LIST_SIZE;
+  struct fb_ar_data *data;
+
+  for (i = 0; i < argc; i++)
+    {
+      if (argv[i][0] != '-')
+	break;
+
+      if (! strcmp (argv[i], "--primary") ||
+	  ! strcmp (argv[i], "-p"))
+	{
+	  if (i >= argc)
+	    quit ("no parameter for %s", argv[i]);
+
+	  i++;
+	  pri_size = get_sector_size (argv[i]);
+	  if (pri_size < MIN_PRI_SIZE)
+	    quit ("primary data size too small");
+	  if (pri_size > MAX_PRI_SIZE)
+	    quit ("primary data size too large");
+	}
+      else if (! strcmp (argv[i], "--extended") ||
+	       ! strcmp (argv[i], "-e"))
+	{
+	  if (i >= argc)
+	    quit ("no parameter for %s", argv[i]);
+
+	  i++;
+	  ext_size = get_sector_size (argv[i]);
+	}
+      else if (! strcmp (argv[i], "--list-size") ||
+	       ! strcmp (argv[i], "-l"))
+	{
+	  if (i >= argc)
+	    quit ("no parameter for %s", argv[i]);
+
+	  i++;
+	  list_size = strtoul (argv[i], 0, 0);
+	}
+      else
+	quit ("invalid option %s for create", argv[i]);
+    }
+
+  list_size = (list_size + 509) / 510;
+  if (list_size > MAX_LIST_SIZE)
+    quit ("list too large");
+
+  fb_ar_mode = 1;
+  fb_boot_base = -1;
+  fb_list_start = 1;
+  fb_list_sectors = list_size;
+  fb_list = xmalloc (list_size << 9);
+  fb_list[0] = 0;
+  fb_list_tail = 0;
+  fb_ar_size = fb_list_start + fb_list_sectors + 1;
+
+  data = (struct fb_ar_data *) global_buffer;
+  data->ar_magic = FB_AR_MAGIC_LONG;
+  data->ver_major = VER_MAJOR;
+  data->ver_minor = VER_MINOR;
+  data->pri_size = pri_size;
+  data->ext_size = ext_size;
+  data->list_used = 1;
+  data->list_size = list_size;
+  write_disk (xd, global_buffer, 1);
+  write_header (xd);
 }
 
 int
@@ -2901,6 +3335,7 @@ main (int argc, char **argv)
 	       ! strcmp (argv[i], "-d"))
 	{
 	  fb_mbr_data = fb_mbr_dbg;
+	  fb_mbr_size = sizeof (fb_mbr_dbg);
 	}
       else
 	quit ("invalid option %s", argv[i]);
@@ -2936,7 +3371,7 @@ main (int argc, char **argv)
   else if (! strcmp (argv[i], "info"))
     {
       read_header (xd, 1);
-      print_info ();
+      print_info (xd);
     }
   else if (! strcmp (argv[i], "clear"))
     {
@@ -3017,10 +3452,15 @@ main (int argc, char **argv)
       load_archive (xd, argc - i - 1, argv + i + 1);
       write_header (xd);
     }
+  else if (! strcmp (argv[i], "create"))
+    {
+      create_archive (xd, argc - i - 1, argv + i + 1);
+    }
   else
     quit ("Invalid command %s", argv[i]);
 
   xd_close (xd);
+  xd_unlock ();
 
   return 0;
 }

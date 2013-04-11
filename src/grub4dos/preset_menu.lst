@@ -2,21 +2,17 @@ pxe detect
 configfile
 default 0
 timeout 1
-fallback 1
 
-title find /menu.lst
-	find --set-root --ignore-floppies --ignore-cd /menu.lst
-	configfile /menu.lst
-
-title find /boot/grub/menu.lst
-	fallback 2
-	find --set-root --ignore-floppies --ignore-cd /boot/grub/menu.lst
-	configfile /boot/grub/menu.lst
-
-title find /grub/menu.lst
-	fallback 3
-	find --set-root --ignore-floppies --ignore-cd /grub/menu.lst
-	configfile /grub/menu.lst
+title find /menu.lst, /boot/grub/menu.lst, /grub/menu.lst
+	errorcheck off
+	configfile /MENU.LST
+	configfile /BOOT/GRUB/MENU.LST
+	configfile /GRUB/MENU.LST
+	find --set-root --ignore-floppies --ignore-cd /menu.lst && configfile /menu.lst
+	find --set-root --ignore-floppies --ignore-cd /boot/grub/menu.lst && configfile /boot/grub/menu.lst
+	find --set-root --ignore-floppies --ignore-cd /grub/menu.lst && configfile /grub/menu.lst
+	errorcheck on
+	commandline
 
 title commandline
 	commandline

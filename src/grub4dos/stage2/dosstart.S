@@ -1213,6 +1213,7 @@ bad_sig:
 	popw	%es
 	movw	$SYSSEG, %ax
 	movw	%ax, %ds
+	cld
 	rep
 	movsw
 	movw	%cs, %ax			# aka SETUPSEG
@@ -2517,8 +2518,9 @@ to_realmode:
 	movl	%cr0, %eax
 	andl	$0x00000011, %eax	/* turn off paging */
 //	orl	$0x60000000, %eax	/* cache disabled! */
+	xorl	%ebx, %ebx
+	movl	%ebx, %cr3	/* reload page dir to asure paging off */
 	movl	%eax, %cr0
-	movl	%eax, %cr3	/* reload page dir to asure paging off */
 //	movl	%cr0, %ebx
 //	andl	$0x60000000, %ebx	/* test if wbinvd is supported */
 //	jz	1f
@@ -2597,7 +2599,7 @@ to_realmode:
 
 init_pic:
 
-#if 1		/* enabled 2008-05-23 */
+#if 0		/* enabled 2008-05-23, comment out 2009-10-06 */
 	/* this is needed for booting via win98 */
 
 	xorw	%ax, %ax
@@ -2624,7 +2626,12 @@ init_pic:
 	//outb(0xff, PIC_MASTER_IMR);	/* mask all of 8259A-1 */
 	//outb(0xff, PIC_SLAVE_IMR);	/* mask all of 8259A-2 */
 
-#if 1	/* marked off 2007-10-07, enabled 2008-05-23 */
+#if 0	/* marked off 2007-10-07, enabled 2008-05-23, disabled 2010-03-13 */
+
+	/* these commands are only valid after init of 8259, so comment out.
+	 *  - tinybit 2010-03-13
+	 */
+
 	/* send clear_mask command to slave and master */
 	movb	$0x48, %al
 	call	send_command_to_slave_and_master
@@ -2639,7 +2646,7 @@ init_pic:
 #endif
 
 
-#if 1	/* marked off 2007-10-07, enabled 2008-05-23 */
+#if 0	/* marked off 2007-10-07, enabled 2008-05-23, disabled 2010-03-13 */
 	########################################################################################
 	## make sure any possible coprocessor is properly reset..
 	########################################################################################
@@ -2671,19 +2678,72 @@ init_pic:
 	cli
 
 	//outb_p(0x11, PIC_MASTER_CMD);	/* ICW1: select 8259A-1 init */
+
+	/* init 8259a-1 */
+
+	# bit 7,6,5	used only in MCS-80/85 mode.
+	#		A7-A5 of interrupt vector address
+	# bit 7=0	unused
+	# bit 6=0	unused
+	# bit 5=0	unused
+	# bit 4=1	start init
+	# bit 3=0	edge trig(PC,XT,AT)
+	# bit 3=1	level trig(MCA)
+	# bit 2=0	call address interval(0=interval of 8, 1=interval of 4)
+	# bit 1=0	cascade mode(AT+ with 2 controlers)
+	# bit 1=1	single mode(PC/XT with 1 controler)
+	# bit 0=0	no ICW4 needed
+	# bit 0=1	ICW4 needed
+
+	# If bit 0=0 then all functions selected in ICW4 are set to zero
+	# (Non-Buffered mode, no Auto-EOI, MCS-80/85 system)
+
 	movb	$0x11, %al
-	movw	$0x20, %dx
+	movw	$0x20, %dx		# 8259-1 command port
 	call	outb_and_delay
 
+	/* the 2nd command byte sent to port 0x21 */
+
+	# in MCS-80/85 mode, bit 7-0 is for interrupt vector address bit 15-8.
+	# in 8086/8088 mode, bit 7-3 is for interrupt vector address bit 7-3.
+ 	#		interrupt vector address bit 2-0 is cleared.
+	# in 8086/8088 mode, bit 2-0 is not used.
+
 	//outb_p(0x20 + 0, PIC_MASTER_IMR);	/* ICW2: 8259A-1 IR0-7 mapped to 0x20-0x27 */
-	movb	$0x08, %al
+	movb	$0x08, %al		# interrupt number 0x08 - 0x0F
 	movw	$0x21, %dx
 	call	outb_and_delay
+
+	/* the 3rd command byte sent to port 0x21 */
+
+	# bit 7=0	no slave connected to IRQ 7
+	# bit 6=0	no slave connected to IRQ 6
+	# bit 5=0	no slave connected to IRQ 5
+	# bit 4=0	no slave connected to IRQ 4
+	# bit 3=0	no slave connected to IRQ 3
+	# bit 2=0	no slave connected to IRQ 2(PC/XT)
+	# bit 2=1	slave connected to IRQ 2(AT+)
+	# bit 1=0	no slave connected to IRQ 1
+	# bit 0=0	no slave connected to IRQ 0
 
 	//outb_p(1U << PIC_CASCADE_IR, PIC_MASTER_IMR);	/* 8259A-1 (the master) has a slave on IR2 */
 	movb	$0x04, %al
 	movw	$0x21, %dx
 	call	outb_and_delay
+
+	/* the 4th command byte sent to port 0x21 */
+
+	# bit 7=0	unused
+	# bit 6=0	unused
+	# bit 5=0	unused
+	# bit 4=0	not special fully nested mode
+	# bit 4=1	special fully nested mode
+	# bit 3=0	non-buffered mode(AT+), bit 2=unused
+	# bit 3=1	buffered mode(PC/XT), bit 2=0(slave)bit 2=1(master)
+	# bit 1=0	normal EOI
+	# bit 1=1	Auto EOI(no system support it)
+	# bit 0=1	8086/8088 mode
+	# bit 0=0	MCS-80/85 mode
 
 	/* Yes, the normal EOI should be used for real mode OS. */
 
@@ -2699,15 +2759,29 @@ init_pic:
 	call	outb_and_delay
 #endif
 
+	/* init 8259a-2 */
+
 	//outb_p(0x11, PIC_SLAVE_CMD);	/* ICW1: select 8259A-2 init */
 	movb	$0x11, %al
 	movw	$0xA0, %dx
 	call	outb_and_delay
 
 	//outb_p(0x20 + 8, PIC_SLAVE_IMR);	/* ICW2: 8259A-2 IR0-7 mapped to 0x28-0x2f */
-	movb	$0x70, %al
+	movb	$0x70, %al		# interrupt number 0x70 - 0x77
 	movw	$0xA1, %dx
 	call	outb_and_delay
+
+	/* the 3rd command byte sent to port 0xA1 */
+
+	# bit 7=0	unused
+	# bit 6=0	unused
+	# bit 5=0	unused
+	# bit 4=0	unused
+	# bit 3=0	unused
+	# bit 2,1,0	slave controler ID, should be 2 for IRQ 2
+	# bit 2=0
+	# bit 1=1
+	# bit 0=0
 
 	//outb_p(PIC_CASCADE_IR, PIC_SLAVE_IMR);	/* 8259A-2 is a slave on master's IR2 */
 	movb	$0x02, %al
@@ -2753,12 +2827,46 @@ init_pic:
 	/* end initialize PIC. */
 
 	/* FIXME: init edge-level-control-registers(IO ports 0x4D0, 0x4D1) for EISA */
+#if 1	/* added 2010-03-13 */
 
-#if 1		/* enabled 2008-05-23 */
+	/* EISA 8259-1 */
+
+	# bit 7=0	IRQ 7 edge trig
+	# bit 6=0	IRQ 6 edge trig
+	# bit 5=0	IRQ 5 edge trig
+	# bit 4=0	IRQ 4 edge trig
+	# bit 3=0	IRQ 3 edge trig
+	# bit 2=x	IRQ 2 (do not change)
+	# bit 1=x	IRQ 1 (do not change)
+	# bit 0=x	IRQ 0 (do not change)
+
+	movw	$0x4D0, %dx
+	inb	%dx, %al
+	andb	$0x07, %al	# clear bit 3-7 in case not cleared
+	call	outb_and_delay
+
+	/* EISA 8259-2 */
+
+	# bit 7=0	IRQ 15 edge trig
+	# bit 6=0	IRQ 14 edge trig
+	# bit 5=x	IRQ 13 (do not change)
+	# bit 4=0	IRQ 12 edge trig
+	# bit 3=0	IRQ 11 edge trig
+	# bit 2=0	IRQ 10 edge trig
+	# bit 1=0	IRQ 9 edge trig
+	# bit 0=x	IRQ 8 (do not change)
+
+	movw	$0x4D1, %dx
+	inb	%dx, %al
+	andb	$0x21, %al	# clear bit 1-4, 6-7 in case not cleared
+	call	outb_and_delay
+#endif
+
+	/* init system timer 0 (stolen from bochs rombios.c) */
+#if 0		/* enabled 2008-05-23, disabled 2010-03-13 */
 	/* this is needed for booting via win98 */
 
 	/* EISA 8259-1 */
-	/* init system timer 0 (stolen from bochs rombios.c) */
 
 	//movb	$0x34, %al	# system timer 0, 16-bit binary count, mode 2
 	movb	$0x36, %al	# system timer 0, 16-bit binary count, mode 3
@@ -2804,7 +2912,7 @@ init_pic:
 	call	outb_and_delay
 #endif
 
-#if 1	/* marked off 2007-10-07, enabled 2008-05-23 */
+#if 0	/* marked off 2007-10-07, enabled 2008-05-23, disabled 2010-03-13 */
 	movb	$0x20, %al	#; send EOI to 8259A-2
 	movw	$0xA0, %dx
 	call	outb_and_delay
@@ -3459,7 +3567,7 @@ use_default_config_file:
 	pushw	%di
 	pushw	%si
 	pushw	%di
-	/* find options --bypass, --time-out=T, --hot-key=K, --duce, --chs-no-tune */
+	/* find options --bypass, --time-out=T, --hot-key=K, --duce, --chs-no-tune, --keep-pxe */
 4:
 	popw	%di
 	popw	%si
@@ -3507,6 +3615,7 @@ use_default_config_file:
 
 	//pushw	%di
 3:
+//////////////////////////////////////////////////////////////////////////////
 	testb	$1, ABS_PSP(options_done)
 	jne	5f
 
@@ -3555,7 +3664,7 @@ use_default_config_file:
 	//popw	%di
 	//pushw	%di
 5:
-
+//////////////////////////////////////////////////////////////////////////////
 	testb	$2, ABS_PSP(options_done)
 	jne	5f
 
@@ -3614,7 +3723,7 @@ use_default_config_file:
 	//pushw	%di
 
 5:
-
+//////////////////////////////////////////////////////////////////////////////
 	testb	$4, ABS_PSP(options_done)
 	jne	5f
 
@@ -3671,7 +3780,7 @@ use_default_config_file:
 
 	//popw	%di
 5:
-
+//////////////////////////////////////////////////////////////////////////////
 	testb	$8, ABS_PSP(options_done)
 	jne	5f
 
@@ -3720,7 +3829,7 @@ use_default_config_file:
 	//popw	%di
 	//pushw	%di
 5:
-
+//////////////////////////////////////////////////////////////////////////////
 	testb	$0x10, ABS_PSP(options_done)
 	jne	5f
 
@@ -3769,6 +3878,56 @@ use_default_config_file:
 	//popw	%di
 	//pushw	%di
 5:
+//////////////////////////////////////////////////////////////////////////////
+	testb	$0x20, ABS_PSP(options_done)
+	jne	5f
+
+	movl	$0x20, ABS_PSP(options_doing)
+	/* compare with "--keep-pxe" */
+	cld			/* compare upward */
+	movw	$ABS_PSP(option_keep_pxe_dos), %si
+	movw	%di, %dx	/* DI is our option string, save to DX */
+	movw	$(option_keep_pxe_dos_end - option_keep_pxe_dos), %cx
+				/* length of the string */
+	repz cmpsb
+	jz	2f		/* yes, exactly */
+
+	movw	$ABS_PSP(option_keep_pxe1_dos), %si
+	movw	%dx, %di	/* restore DI from DX */
+	movw	$(option_keep_pxe1_dos_end - option_keep_pxe1_dos), %cx
+				/* length of the string */
+	repz cmpsb
+	jnz	3f
+2:
+	/* found "--keep-pxe" */
+	cmpb	$0x20, (%di)
+	je	2f
+	cmpb	$0, (%di)
+	jne	3f
+	//orb	$1, ABS_PSP(options_done)
+2:
+	cmpl	$0, ABS_PSP(keep_pxe)
+	jne	invalid_option	/* specify --keep-pxe twice */
+	movl	$1, ABS_PSP(keep_pxe)
+	/* wipe off "--keep-pxe" */
+	movw	$(option_keep_pxe_dos_end - option_keep_pxe_dos), %cx
+	subw	%cx, %di
+	movb	$0x22, %al	/* double-quote */
+	stosb
+	decw	%cx
+	movb	$0x20, %al	/* SPACE */
+	repz stosb
+3:
+	popw	%ax		/* discard old DI */
+	pushw	%di		/* push new DI */
+	//testb	$1, ABS_PSP(options_done)
+	//jz	4b
+	jmp	4b
+
+	//popw	%di
+	//pushw	%di
+5:
+//////////////////////////////////////////////////////////////////////////////
 
 //	testb	$2, ABS_PSP(options_done)
 //	jne	5f
@@ -3996,7 +4155,10 @@ put_config_file_name:
 	movb	ABS_PSP(chs_no_tune), %ah
 	shlb	$3, %ah				/* bit3=chs-no-tune */
 	orb	%ah, %al
-	orb	$0x01, %al			/* bit0=disable pxe */
+	movb	ABS_PSP(keep_pxe), %ah
+	decb	%ah
+	negb	%ah		/* AH=disable pxe */
+	orb	%ah, %al			/* bit0=disable pxe */
 	orb	%al, -13(%di)
 
 	xorl	%eax, %eax	/* 0 means the end of the string */
@@ -6499,6 +6661,16 @@ option_chs_no_tune1_dos:
 	.ascii	"--CHS-NO-TUNE"
 option_chs_no_tune1_dos_end:
 	.align	4
+option_keep_pxe_dos:
+	.ascii	"--keep-pxe"
+option_keep_pxe_dos_end:
+	.align	4
+keep_pxe:
+	.long	0
+option_keep_pxe1_dos:
+	.ascii	"--KEEP-PXE"
+option_keep_pxe1_dos_end:
+	.align	4
 option_config_file_dos:
 	.ascii	"--config-file="
 option_config_file_dos_end:
@@ -6520,11 +6692,9 @@ usage_string: /* DOS string terminator is dollar($), not the null char */
 	.ascii	"\r\nGRUB: Unrecognized or failed command line parameters. Usage:\r\n"
 	.ascii	"\tGRUB [OPTIONS]\r\n"
 	.ascii	"OPTIONS: --bypass, --time-out=T, --hot-key=K, --duce, --chs-no-tune,\r\n"
-	.ascii	"OPTIONS: --config-file=\"FILE\"\r\n"
+	.ascii	"OPTIONS: --keep-pxe, --config-file=\"FILE\"\r\n"
 	.ascii	"The options are case-sensitive, you must use lower-case letters. Each\r\n"
 	.ascii	"option can be specified only once at most.\r\n"
-//	.ascii	"option can be specified only once at most. FILE defaults to (hd0,0)/menu.lst:\r\n"
-//	.ascii	"\tGRUB --config-file=(hd0,0)/menu.lst\r\n"
 	.ascii	"FILE can be specified in GRUB or DOS style. If FILE is led by the pair '#@',\r\n"
 	.ascii	"then a DOS filename follows.\r\n"
 	.ascii	"FILE can also be some GRUB commands delimited by semi-colon, or the whole\r\n"
@@ -6541,6 +6711,9 @@ dos_unsupport_string:
 #else
 	.ascii	"\r\nFailure restore ROM INT 0xHH vector. Unsupported DOS, device driver, or TSR.\r\n$"
 #endif
+
+failed_BDA_EBDA_string:
+	.ascii	"\r\nFailure restore BDA/EBDA. Unsupported DOS, device driver, or TSR.\r\n$"
 
 #if 0
 A20_crash_string:
@@ -7264,6 +7437,8 @@ restore_BIOS_environment:
 
 	call	restore_BDA_EBDA
 
+	jc	failed_restore_BDA_EBDA
+
 	/* Note for people who are tracing/debugging this program:
 	 *
 	 * Oh! Don't continue. The interrupt vector table will be changed!
@@ -7328,6 +7503,1149 @@ failed_probe_int:
 	movl	$ABS_START(dos_unsupport_string), ABS_PSP(error_message)
 	jmp	message_exit1
 
+
+#ifndef	BAD_BIOS
+compare_to_lowmem_size:
+
+	pushw	%ds
+	pushw	%bx
+	pushl	%ecx
+	xorw	%bx, %bx
+	movw	%bx, %ds	/* DS=0 */
+	movl	%eax, %ecx
+	movw	%ax, %bx
+	shrl	$16, %ecx	/* CX=segment */
+	shrw	$4, %bx
+	addw	%bx, %cx
+	movw	0x413, %bx	/* low mem size in KB */
+	shlw	$6, %bx		/* low mem size in paragraphs */
+	cmpw	%bx, %cx
+	popl	%ecx
+	popw	%bx
+	popw	%ds
+	ret
+
+/* begin guess_dos_versions */
+guess_dos_versions:
+
+	/* OK, now begin to guess dos versions */
+
+	/* check MS-DOS 7.0+ */
+	
+	xorw	%ax, %ax
+	movw	%ax, %ds		/* DS=0 */
+
+	movw	$0x0560, %si /* begins the int 08 vector */
+	cld
+	lodsl			/* int 08 - IRQ 0 - system timer */
+	cmpl	$0xC0000000, %eax
+	jb	failed_check_msdos7plus
+	lodsl			/* int 09 - IRQ 1 - keyboard data ready */
+	cmpl	$0xC0000000, %eax
+	jb	failed_check_msdos7plus
+	//lodsl			/* int 0A - IRQ 2 - LPT2(PC), vertical retrace interrupt */
+	//lodsl			/* int 0B - IRQ 3 - serial communications(COM2) */
+	//lodsl			/* int 0C - IRQ 4 - serial communications(COM1) */
+	//lodsl			/* int 0D - IRQ 5 - fixed disk(PC,XT), LPT2(AT), reserved(PS/2) */
+	//lodsl			/* int 0E - IRQ 6 - diskette controller */
+	//lodsl			/* int 0F - IRQ 7 - parallel printer */
+#if 0
+	/* this area seems to be an internal MSDOS stack, so may be corrupted */
+	movw	$0x05dc, %si /* begins the int 70 vector */
+	movw	$0x0008, %cx /* 8 vectors to check, from int 70 to 77 */
+	call	check_a_range_of_ROM_vectors
+	jc	failed_check_msdos7plus
+#else
+	movw	$0x05DC, %si	/* int 70 - IRQ 8 - CMOS real-time clock */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	movw	$0x01C0, %si	/* int 70 - IRQ 8 - CMOS real-time clock */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	ldsw	-4(%si), %si	/* DS changed! */
+	subw	$4, %si
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jb	failed_check_msdos7plus
+	xorw	%ax, %ax
+	movw	%ax, %ds	/* DS = 0 */
+1:
+	movw	$0x05E0, %si	/* int 71 - IRQ 9 - redirected to int 0A by BIOS */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	movw	$0x01C4, %si	/* int 71 - IRQ 9 - redirected to int 0A by BIOS */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jb	failed_check_msdos7plus
+1:
+//	movw	$0x05E4, %si	/* int 72 - IRQ 10 - reserved */
+//	cld
+//	lodsl
+//	cmpl	$0xC0000000, %eax
+//	jnb	1f
+//	movw	$0x01C8, %si	/* int 72 - IRQ 10 - reserved */
+//	cld
+//	lodsl
+//	cmpl	$0xC0000000, %eax
+//	jnb	1f
+//	ldsw	-4(%si), %si	/* DS changed! */
+//	lodsw
+//	cmpw	$0x10EB, %ax
+//	jne	failed_check_msdos7plus
+//	lodsl
+//	cmpl	$0xC0000000, %eax
+//	jb	failed_check_msdos7plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds	/* DS = 0 */
+1:
+//	movw	$0x05e8, %si	/* int 73 - IRQ 11 - reserved */
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	movw	$0x01cc, %si
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	ldsw	-4(%si), %si   /* DS got changed */
+//	lodsw
+//	cmpw	$0x10eb, %ax
+//	jne	failed_check_msdos7plus
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos7plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds	/* let DS = 0 */
+1:
+//	movw	$0x05ec, %si	/* int 74 - IRQ 12 - pointing device(PS) */
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	movw	$0x01d0, %si
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	ldsw	-4(%si), %si   /* DS got changed */
+//	lodsw
+//	cmpw	$0x10eb, %ax
+//	jne	failed_check_msdos7plus
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos7plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds	/* let DS = 0 */
+1:
+	movw	$0x05f0, %si	/* int 75 - IRQ 13 - math coprocessor exception(AT+) */
+	cld
+	lodsl
+	cmpl	$0xc0000000, %eax
+	jnb	1f
+	movw	$0x01d4, %si
+	cld
+	lodsl
+	cmpl	$0xc0000000, %eax
+	jb	failed_check_msdos7plus
+1:
+//	movw	$0x05f4, %si	/* int 76 - IRQ 14 - hard disk controller - operation complete(AT+) */
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	movw	$0x01d8, %si
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	ldsw	-4(%si), %si   /* DS got changed */
+//	lodsw
+//	cmpw	$0x10eb, %ax
+//	jne	failed_check_msdos7plus
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos7plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds	/* let DS = 0 */
+1:
+//	movw	$0x05f8, %si	/* int 77 - IRQ 15 - reserved(AT, PS) - secondary IDE controller */
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	movw	$0x01dc, %si
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	ldsw	-4(%si), %si   /* DS got changed */
+//	lodsw
+//	cmpw	$0x10eb, %ax
+//	jne	failed_check_msdos7plus
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos7plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds	/* let DS = 0 */
+1:
+#endif
+	cmpl	$0, 0x5A4	/* int 19 vector(?) must be 0 */
+	jnz	failed_check_msdos7plus
+
+	cmpl	$0xC0000000, 0x5D4	/* int 4B - Virtual DMA Specification */
+	jb	failed_check_msdos7plus
+
+	movw	$0x800, %si	/* another saved int 10 vector */
+	cld
+	lodsb
+	cmpb	$0x10, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x580	/* saved int 10 vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x805, %si	/* another saved int 13 vector */
+	cld
+	lodsb
+	cmpb	$0x13, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x58C	/* saved int 13 vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x80A, %si	/* another saved int 15 vector */
+	cld
+	lodsb
+	cmpb	$0x15, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x594	/* saved int 15 vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x814, %si	/* another saved int 1B vector */
+	cld
+	lodsb
+	cmpb	$0x1B, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x5AC	/* saved int 1B vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x819, %si	/* another saved int 4F vector */
+	cld
+	lodsb
+	cmpb	$0x4F, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x5D8	/* saved int 4F vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x81E, %si	/* another saved int 08 vector */
+	cld
+	lodsb
+	cmpb	$0x08, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x560	/* saved int 08 vector */
+	jnz	failed_check_msdos7plus
+
+	movw	$0x823, %si	/* another saved int 0F vector */
+	cld
+	lodsb
+	cmpb	$0x0F, %al
+	jnz	failed_check_msdos7plus
+	cld
+	lodsl
+	cmpl	%eax, 0x57C	/* saved int 0F vector */
+	jnz	failed_check_msdos7plus
+
+	/* yes, it is MS-DOS 7.0+ */
+	movl	$0x4D530700, %cs:ABS_START(dos_version)	/* 0x4D53 = MS */
+	
+	xorw	%ax, %ax
+	movw	%ax, %ds		/* DS=0 */
+	movw	$0x540, %si		/* int 00 to 1F */
+	movw	%cs, %ax
+	movw	%ax, %es		/* ES=CS */
+	movw	$ABS_START(bios_interrupt_vector_table), %di
+
+	/* Fix int1A remote boot problem. Reported by John Cobb (Queen Mary, University of London). */
+	movw	$0x0020, %cx		/* int 00 to 1F */
+	cld
+1:
+	lodsl
+	cmpl	$0xC0000000, %es:(%di)	/* Is it already a ROM vector? */
+	jnb	2f			/* Yes. Keep it untouched. */
+	/* if it points to beyond the low mem, we accept it. */
+	cmpl	$0x5A000000, %es:(%di)
+	jb	8f
+	pushw	%ds
+	pushw	%bx
+	pushw	%cx
+	xorw	%bx, %bx
+	movw	%bx, %ds	/* DS=0 */
+	movw	0x413, %bx	/* low mem size in KB */
+	shlw	$6, %bx		/* low mem size in paragraphs */
+	movw	%es:(%di), %cx	/* offset */
+	shrw	$4, %cx
+	addw	%es:2(%di), %cx
+	cmpw	%bx, %cx
+	popw	%cx
+	popw	%bx
+	popw	%ds
+	jnb	2f
+8:
+	stosl				/* No. Store the new vector. */
+	subw	$4, %di
+2:
+	addw	$4, %di
+	loop	1b
+
+	movw	$0x5C0, %si		/* int 40 to 43 */
+	movw	$ABS_START(bios_interrupt_vector_table + 0x100), %di
+	movw	$0x0004, %cx		/* int 40 to 43 */
+	repz movsl
+
+	lodsl				/* int 46 */
+	movw	$ABS_START(bios_interrupt_vector_table + 0x118), %di
+	stosl
+
+	lodsl				/* int 4B, maybe changed by emm386 */
+	movw	$ABS_START(bios_interrupt_vector_table + 0x12C), %di
+	stosl
+
+	lodsl				/* int 4F */
+	movw	$ABS_START(bios_interrupt_vector_table + 0x13C), %di
+	stosl
+#if 0
+	/* the area 0x5dc-0x5ff seems to be an internal MSDOS stack, so may be corrupted */
+	movw	$0x01c0, %di	/* int 70 to 77 */
+	movw	$0x0010, %cx	/* 16 words to move */
+	repz movsw
+#else
+	movw	$0x5DC, %si	/* int 70 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1C0, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	subw	$4, %si
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1C0), %di
+	stosl			/* save new int 70 */
+1:
+	movw	$0x1C4, %si	/* int 71 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	movw	$0x5E0, %si	/* int 71 */
+	cld
+	lodsl
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jb	1f
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1C4), %di
+	stosl			/* save new int 71 */
+1:
+	movw	$0x5E4, %si	/* int 72 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1C8, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	lodsw
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1C8), %di
+	stosl			/* save new int 72 */
+1:
+	movw	$0x5E8, %si	/* int 73 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1CC, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	lodsw
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1CC), %di
+	stosl			/* save new int 73 */
+1:
+	movw	$0x5EC, %si	/* int 74 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1D0, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	lodsw
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1D0), %di
+	stosl			/* save new int 74 */
+1:
+	movw	$0x1D4, %si	/* int 75 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	movw	$0x5F0, %si	/* int 75 */
+	cld
+	lodsl
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jb	1f
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1D4), %di
+	stosl			/* save new int 75 */
+1:
+	movw	$0x5F4, %si	/* int 76 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1D8, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	lodsw
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1D8), %di
+	stosl			/* save new int 76 */
+1:
+	movw	$0x5F8, %si	/* int 77 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	2f
+	movw	$0x1DC, %si
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	call	compare_to_lowmem_size
+	jnb	1f		/* need not change */
+	ldsw	-4(%si), %si	/* DS changed! */
+	lodsw
+	lodsl
+	xorw	%si, %si
+	movw	%si, %ds	/* DS = 0 */
+	//cmpl	$0xC0000000, %eax
+	call	compare_to_lowmem_size
+	jnb	2f
+	movl	%cs:ABS_START(dummy_iret_vector), %eax
+2:
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1DC), %di
+	stosl			/* save new int 77 */
+1:
+#endif
+	movw	$0x810, %si	/* another saved int 19 */
+	lodsl
+	movw	$ABS_START(bios_interrupt_vector_table + 0x0064), %di
+	stosl
+
+	movw	$0x170, %si	/* int 5C */
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f
+	ldsw	-4(%si), %si	/* DS changed! */
+	cld
+	lodsb
+	cmpb	$0xEA, %al	/* 0xEA=opcode for jmp far */
+	jne	1f
+	lodsl
+	movw	$ABS_START(bios_interrupt_vector_table + 0x170), %di
+	stosl			/* save new int 5C */
+1:
+	xorw	%si, %si	/* CF=0 */
+	movw	%si, %ds	/* DS = 0 */
+
+	//clc			/* CF already cleared */
+	ret
+
+failed_check_msdos7plus:
+//	/* check MS-DOS 5.0+ */
+//	
+//	xorw	%ax, %ax
+//	movw	%ax, %ds
+//
+//	movw	$0x0800, %si
+//	cld
+//	lodsb
+//	cmpb	$0x10, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x13, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0x98000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x15, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x19, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x1b, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//
+//	movw	$0x0d41, %si
+//	cld
+//	lodsb
+//	cmpb	$0x02, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x08, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x09, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x0a, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x0b, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x0c, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x0d, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x0e, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x70, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x72, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x73, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x74, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	cld
+//	lodsb
+//	cmpb	$0x76, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	addw	$0x000d, %ax
+//	movw	%ax, %si
+//	shrl	$0x10, %eax
+//	movw	%ax, %ds
+//	lodsw
+//	movw	%ax, %si
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//	xorw	%ax, %ax
+//	movw	%ax, %ds
+//	movw	$0x0d82, %si
+//1:
+//	cld
+//	lodsb
+//	cmpb	$0x77, %al
+//	jnz	failed_check_msdos5plus
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	failed_check_msdos5plus
+//
+//	call	restore_BDA_EBDA
+//	
+//	cli
+//	xorw	%ax, %ax
+//	movw	%ax, %es
+//	movw	%ax, %ds
+//
+//	movw	$0x0800, %si
+//	cld
+//	lodsb
+//	movw	$0x0040, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x004c, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0054, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0064, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x006c, %di
+//	cld
+//	lodsl
+//	stosl
+//
+//	movw	$0x0d41, %si
+//	cld
+//	lodsb
+//	movw	$0x0008, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0020, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0024, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0028, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x002c, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0030, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0034, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x0038, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x01c0, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x01c8, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x01cc, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x01d0, %di
+//	cld
+//	lodsl
+//	stosl
+//	cld
+//	lodsb
+//	movw	$0x01d8, %di
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jnb	1f
+//	addw	$0x000d, %ax
+//	movw	%ax, %si
+//	shrl	$0x10, %eax
+//	movw	%ax, %ds
+//	lodsw
+//	movw	%ax, %si
+//	lodsl
+//1:
+//	stosl
+//	xorw	%ax, %ax
+//	movw	%ax, %ds
+//	movw	$0x0d82, %si
+//	cld
+//	lodsb
+//	movw	$0x01dc, %di
+//	cld
+//	lodsl
+//	stosl
+//
+//	jmp	move_stage2_image
+//
+//check_msdos4minus:
+//	/* check MS-DOS 4.0- */
+//	
+//	xorw	%ax, %ax
+//	movw	%ax, %ds
+//
+//	movw	%bx, %si	/* int 19 */
+//	cld
+//	lodsl
+//	cmpl	$0xc0000000, %eax
+//	jb	1f
+//	cld
+//	lodsb
+//	cmpb	$0x01, %al  /* the byte 01 followed by int 02, ... */
+//	jnz	1f
+//	
+//		/* int 02,08-0e,70,72-74,76-77 */
+//	movw	$0x000e, %cx /* 14 vectors to check */
+//	call	check_a_range_of_ROM_vectors
+//	jc	1f
+//
+//	pushw	%bx
+//	call	restore_BDA_EBDA
+//	popw	%bx
+//	
+//	cli
+//	cld
+//	xorw	%ax, %ax
+//	movw	%ax, %es
+//	movw	%ax, %ds
+//	movw	%bx, %si	/* int 19 */
+//	movw	$0x0064, %di
+//	lodsl
+//	stosl
+//	lodsb			/* the byte "01" */
+//	movw	$0x0008, %di	/* int 02 */
+//	lodsl
+//	stosl
+//	movw	$0x0020, %di	/* int 08 to 0f */
+//	movw	$0x000e, %cx	/* 14 words to move */
+//	repz movsw
+//	movw	$0x01c0, %di	/* int 70 */
+//	lodsl
+//	stosl
+//	movw	$0x01c8, %di	/* int 72 */
+//	lodsl
+//	stosl
+//	lodsl			/* int 73 */
+//	stosl
+//	lodsl			/* int 74 */
+//	stosl
+//	movw	$0x01d8, %di	/* int 76 */
+//	lodsl
+//	stosl
+//	lodsl			/* int 77 */
+//	stosl
+//
+//	clc
+//	ret
+//1:
+//	stc	/* failed_check_msdos4minus */
+//	ret
+//
+//failed_check_msdos5plus:
+//	/* check for MS-DOS 4.01 */
+//	
+//	movw	$0x240e, %bx
+//	call	check_msdos4minus
+//	jc	failed_check_msdos4
+//
+//	jmp	move_stage2_image
+//
+//failed_check_msdos4:
+//	/* check for MS-DOS 3.30 */
+//	
+//	movw	$0x2172, %bx
+//	call	check_msdos4minus
+//	jc	failed_check_msdos3
+//
+//	jmp	move_stage2_image
+//
+//failed_check_msdos3:
+
+	/* check FreeDOS (build 2029+) */
+	
+	/*
+	 * MS himem.sys takes over int 15, so check for the case.
+	 */
+	
+	xorw	%ax, %ax
+	movw	%ax, %es
+	movw	%ax, %ds
+	movw	$0x0054, %di
+	movl	(%di), %eax		/* int 15 vector in table */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jnb	1f			/* yes, do nothing */
+	movw	$0x3086, %si		/* no, take one from himem */
+	movl	(%si), %eax
+	cmpl	$0xC0000000, %eax	/* is it a system BIOS vector? */
+	jb	failed_check_freedos	/* no, do not continue */
+1:					/* yes, continue */
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	movw	$0x0020, %si		/* DS:SI points to int 08 */
+	lodsl
+	movl	%eax, %ebx
+	movl	%eax, %edx
+	movw	$7, %cx
+1:
+	lodsl
+	addw	$6, %bx
+	jc	failed_check_freedos
+	cmpl	%eax, %ebx
+	jnz	failed_check_freedos
+	loop	1b
+	
+	movw	$0x1C0, %si		/* DS:SI points to int 70 */
+	movw	$8, %cx
+1:
+	lodsl
+	addw	$6, %bx
+	jc	failed_check_freedos
+	cmpl	%eax, %ebx
+	jnz	failed_check_freedos
+	loop	1b
+	
+	movw	%dx, %si
+	shrl	$16, %edx
+	movw	%dx, %ds	/* DS:SI points to int 08 routine */
+
+	movw	$16, %cx
+	xorw	%bx, %bx
+	xorw	%dx, %dx
+1:
+	lodsw
+	cmpw	$0xBB53, %ax	/* 0x53="pushw %bx",0xBB="movw $(...), %bx" */
+	jnz	failed_check_freedos
+	lodsw
+	cmpw	%ax, %bx
+	jnz	failed_check_freedos
+	addw	$4, %bx
+	cmpw	$1, %cx
+	jz	2f
+	lodsb
+	cmpb	$0xEB, %al	/* 0xEB="jmp ..." */
+	jnz	failed_check_freedos
+	lodsb
+	orw	%dx, %dx
+	jnz	3f
+	movw	%si, %dx
+	xorb	%ah, %ah
+	addw	%ax, %dx
+	jc	failed_check_freedos
+	jmp	2f
+3:
+	xorb	%ah, %ah
+	addw	%si, %ax
+	jc	failed_check_freedos
+	cmpw	%ax, %dx
+	jnz	failed_check_freedos
+2:
+	loop	1b
+
+	addw	$0x0025, %si
+	lodsb
+	cmpb	$0x9C, %al	/* 0x9C="pushfw" */
+	jnz	failed_check_freedos
+	lodsw
+	cmpw	$0x9FFF, %ax	/* 0x9FFF="call far [bx+????]" */
+	jnz	failed_check_freedos
+	lodsw
+	/*xorl	%esi, %esi*/
+	movw	%ax, %si	/* DS:SI begins old int 08-0F,70-77 vectors */
+	movw	%ds, %ax
+	orb	%ah, %ah
+	jnz	failed_check_freedos
+	shlw	$4, %ax
+	addw	%ax, %si	/* 0000:SI begins the above int08-77vectors */
+	jc	failed_check_freedos
+	
+	
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	/*movw	$0x08a4, %si*/	/* int 08-0f,70-77 begins here */
+	movw	%si, %di	/* save SI into DI */
+	cld
+	lodsl			/* int 08 */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jb	failed_check_freedos
+	lodsl			/* int 09 */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jb	failed_check_freedos
+	lodsl			/* int 0A */
+	lodsl			/* int 0B */
+	lodsl			/* int 0C */
+	lodsl			/* int 0D */
+	lodsl			/* int 0E */
+	lodsl			/* int 0F */
+	lodsl			/* int 70 */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jb	failed_check_freedos
+	lodsl			/* int 71 */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jb	failed_check_freedos
+	lodsl			/* int 72 */
+	lodsl			/* int 73 */
+	lodsl			/* int 74 */
+	lodsl			/* int 75 */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jb	failed_check_freedos
+	lodsl			/* int 76 */
+	lodsl			/* int 77 */
+
+	/* yes, it is FreeMS */
+	movl	$0x46720000, %cs:ABS_START(dos_version)	/* 0x4672 = Fr */
+
+	movw	%di, %si	/* restore SI from DI */
+	xorw	%ax, %ax
+	movw	%ax, %ds		/* DS=0 */
+	/*movw	$0x08a4, %si*/
+	movw	%cs, %ax
+	movw	%ax, %es		/* ES=CS */
+	movw	$ABS_START(bios_interrupt_vector_table + 0x20), %di
+	movw	$0x0008, %cx	/* int 08 to 0F */
+	cld
+	repz movsl
+	movw	$ABS_START(bios_interrupt_vector_table + 0x1C0), %di
+	movw	$0x0008, %cx	/* int 70 to 77 */
+	cld
+	repz movsl
+	
+	/*
+	 * MS himem.sys takes over int 15, so try to restore it
+	 */
+	
+	movw	$0x0054, %di
+	movl	(%di), %eax		/* int 15 vector in table */
+	cmpl	$0xC0000000, %eax	/* is it a valid BIOS vector? */
+	jnb	1f			/* yes, do nothing */
+	movw	$0x3086, %si		/* no, take one from himem */
+	movl	(%si), %eax
+	cmpl	$0xC0000000, %eax	/* is it a system BIOS vector? */
+	jb	1f			/* no, do nothing */
+	addw	$ABS_START(bios_interrupt_vector_table), %di
+	stosl				/* yes, write it to the table */
+1:
+	clc
+	ret
+
+failed_check_freedos:
+
+	/* check DOSbox */
+	
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	movw	$0x0020, %si	/* int 08-1f */
+	movw	$0x0018, %cx /* 24 vectors to check */
+	call	check_a_range_of_ROM_vectors
+	jc	failed_check_dosbox
+
+	/* yes, it is DOSbox */
+	movl	$0xD05B5800, %cs:ABS_START(dos_version)
+	
+	//clc
+	ret
+
+check_a_range_of_ROM_vectors:
+1:
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax	/* ROM vectors assumed to be above C000:0 */
+	jb	1f			/* check failed, with carry */
+	loop	1b
+					/* check passed, with no carry */
+1:
+	ret
+
+failed_check_dosbox:
+
+	ret
+
+/* end guess_dos_versions */
+#endif
+
+dos_version:
+
+	.long	0
 
 probe_int:
 
@@ -7610,8 +8928,27 @@ probe_int:
 	cld
 1:
 	lodsl
-	cmpl	$0xC0000000, (%di)	/* Is it already a ROM vector? */
+	cmpl	$0xC0000000, %es:(%di)	/* Is it already a ROM vector? */
 	jnb	2f			/* Yes. Keep it untouched. */
+	/* if it points to beyond the low mem, we accept it. */
+	cmpl	$0x5A000000, %es:(%di)
+	jb	8f
+	pushw	%ds
+	pushw	%bx
+	pushw	%cx
+	xorw	%bx, %bx
+	movw	%bx, %ds	/* DS=0 */
+	movw	0x413, %bx	/* low mem size in KB */
+	shlw	$6, %bx		/* low mem size in paragraphs */
+	movw	%es:(%di), %cx	/* offset */
+	shrw	$4, %cx
+	addw	%es:2(%di), %cx
+	cmpw	%bx, %cx
+	popw	%cx
+	popw	%bx
+	popw	%ds
+	jnb	2f
+8:
 	stosl				/* No. Store the new vector. */
 	subw	$4, %di
 2:
@@ -7645,7 +8982,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1C0, %si
+	movw	$0x1C0, %si	/* int 70 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -7661,6 +8998,11 @@ probe_int:
 	movw	$ABS_START(bios_interrupt_vector_table + 0x1C0), %di
 	stosl			/* save new int 70 */
 1:
+	movw	$0x1C4, %si	/* int 71 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
 	movw	$0x5E0, %si	/* int 71 */
 	cld
 	lodsl
@@ -7674,7 +9016,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1C8, %si
+	movw	$0x1C8, %si	/* int 72 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -7695,7 +9037,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1CC, %si
+	movw	$0x1CC, %si	/* int 73 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -7716,7 +9058,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1D0, %si
+	movw	$0x1D0, %si	/* int 74 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -7732,6 +9074,11 @@ probe_int:
 	movw	$ABS_START(bios_interrupt_vector_table + 0x1D0), %di
 	stosl			/* save new int 74 */
 1:
+	movw	$0x1D4, %si	/* int 75 */
+	cld
+	lodsl
+	cmpl	$0xC0000000, %eax
+	jnb	1f		/* need not change */
 	movw	$0x5F0, %si	/* int 75 */
 	cld
 	lodsl
@@ -7745,7 +9092,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1D8, %si
+	movw	$0x1D8, %si	/* int 76 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -7766,7 +9113,7 @@ probe_int:
 	lodsl
 	cmpl	$0xC0000000, %eax
 	jnb	2f
-	movw	$0x1DC, %si
+	movw	$0x1DC, %si	/* int 77 */
 	cld
 	lodsl
 	cmpl	$0xC0000000, %eax
@@ -8472,7 +9819,21 @@ check_a_range_of_ROM_vectors:
 	addw	$4, %di
 	loop	2b
 
-	/* ES=CS, DS=0 */
+	call	guess_dos_versions
+
+//	cmpl	$0x4D530700, %cs:ABS_START(dos_version)	/* 0x4D53 = MS */
+//	jne	1f
+//
+//	jmp	2f
+//1:
+//	cmpl	$0x46720000, %cs:ABS_START(dos_version)	/* 0x4672 = Fr */
+//	jne	2f
+//
+//2:
+	movw	%cs, %ax
+	movw	%ax, %es		/* ES=CS */
+	xorw	%ax, %ax
+	movw	%ax, %ds		/* DS=0 */
 
 	/* save the current int 00 - 1F vectors */
 	xorw	%si, %si		/* DS:SI=0000:0000 */
@@ -8724,15 +10085,19 @@ check_a_range_of_ROM_vectors:
 	jne	8f
 //	je	3f
 
-	/* qemu sets this to dummy. */
+	/* once again DELL places garbage string "LL FX09   " over int03-05
+	 * to prevent/block our probing mechanism. We have to cancel this probing.
+	 */
 
-	call	restore_vector
-	jc	3f
-	jmp	2f
+	///* qemu sets this to dummy. */
+	//call	restore_vector
+	//jc	3f
+	//jmp	2f
+	jmp	3f	/* set to dummy */
 8:
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x18, %di	/* int 06 */
 	jne	8f
-#if 0
+#if 1
 	/* FreeDOS takes over int06, so we couldn't probe it. Set it to dummy. */
 	jmp	3f
 #else
@@ -8751,18 +10116,22 @@ check_a_range_of_ROM_vectors:
 	jb	7f
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x40, %di
 	jnb	7f
+	cmpl	$0, %cs:ABS_START(dos_version)	/* known DOS? */
+	jne	2f				/* do not probe */
 	call	restore_vector
 	jnc	2f
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x30, %di	/* int 0C */
-	je	3f	
+	je	3f	/* set to dummy */
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x34, %di	/* int 0D */
-	je	3f	
+	je	3f	/* set to dummy */
 	jmp	9f
 7:
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x1C0, %di	/* int 70-77 hardware IRQs */
 	jb	7f
 	cmpw	$ABS_START(bios_interrupt_vector_table) + 0x1E0, %di
 	jnb	7f
+	cmpl	$0, %cs:ABS_START(dos_version)	/* known DOS? */
+	jne	2f				/* do not probe */
 	call	restore_vector
 	jc	9f
 	jmp	2f
@@ -9576,7 +10945,7 @@ restore_vector:
 	 * Take care!
 	 */
 
-	/* replace int1 handler */
+	/* replace int1 and int2 handler */
 	pushw	%ax
 	pushw	%es
 	pushw	%di
@@ -9589,6 +10958,10 @@ restore_vector:
 	stosw				/* setup new int1 handler offset */
 	movw	%cs, %ax
 	stosw				/* setup new int1 handler segment */
+	movw	$ABS_START(int2_handler), %ax
+	stosw				/* setup new int2 handler offset */
+	movw	%cs, %ax
+	stosw				/* setup new int2 handler segment */
 	popw	%di
 	popw	%es
 	popw	%ax
@@ -9612,7 +10985,7 @@ restore_vector:
 	pushw	$ABS_START(fault_recovery_handler)
 	popl	%eax
 
-	/* Catch CPU exceptions 0, 2, 3, 4, 5, 6, 7
+	/* Catch CPU exceptions 0, 3, 4, 5, 6, 7
 	 *	0	Divide
 	 *	1	Debug - handled by int1_handler
 	 *	2	NMI
@@ -9625,8 +10998,7 @@ restore_vector:
 
 	cld
 	stosl				/* setup int 00 */
-	addw	$4, %di			/*  skip int 01 */
-	stosl				/* setup int 02 */
+	addw	$8, %di			/*  skip int 01 and int 02 */
 	stosl				/* setup int 03 */
 	stosl				/* setup int 04 */
 	stosl				/* setup int 05 */
@@ -9664,8 +11036,9 @@ restore_vector:
 	 * With additional PUSHF/POPF, the TF can be safely cleared.
 	 */
 
+	cli		/* added 2010-05-25 */
 	pushfw		/* additional PUSHF */
-	cli		/* added 2008-08-04 */
+	//cli		/* added 2008-08-04, commented out 2010-05-25 */
 	pushfw		/* PUSHF here together with LCALL below form an INT */
 
 	/* set the TF flag */
@@ -9679,7 +11052,7 @@ restore_vector:
 
 	lcall	*(%di)	/* PUSHF above together with LCALL here form an INT */
 
-	sti		/* added 2008-08-04 */
+	//sti		/* added 2008-08-04, commented out 2010-05-25 */
 	popfw		/* additional POPF */
 
 	/* TF is cleared here automatically */
@@ -9695,7 +11068,7 @@ restore_int_00_1F:
 	pushl	$0
 	popfl			#; CLD, CLI, Clear TF and many more...
 
-	sti		/* added 2008-08-04 */
+	//sti		/* added 2008-08-04, commented out 2010-05-25 */
 	/* restore the original int 00 - 1F vectors */
 	pushw	%cs
 	popw	%ds		/* DS=CS */
@@ -9711,7 +11084,7 @@ restore_int_00_1F:
 	movw	%di, %es	/* ES:DI=0000:0000 */
 	movw	$32, %cx
 
-	cli		/* added 2008-08-04 */
+	//cli		/* added 2008-08-04, commented out 2010-05-25 */
 	cld
 	repz movsl
 	sti		/* added 2008-08-04 */
@@ -9752,7 +11125,6 @@ int1_handler:
 
 	/* if it points to beyond the low mem, we accept it. */
 	cmpl	$0x5A000000, %eax
-//	jb	3f		/* marked out in 2008-05-07 */
 	jb	1f
 	pushw	%ds
 	pushw	%bx
@@ -9770,87 +11142,6 @@ int1_handler:
 	popw	%ds
 	jnb	5f
 	jmp	1f
-//3:				/* marked out in 2008-05-07 */
-//	/* if int 13 or int 15 */
-//
-//	cmpl	$ABS_START(bios_interrupt_vector_table + 0x4C), %cs:ABS_START(tmp_vector) // int 13
-//	jne	3f
-//	cmpl	$0, %cs:ABS_START(tmp_int13_vector)	/* check already done? */
-//	jne	1f					/* yes, skip */
-//
-//	cmpl	$0x5A000000, %eax	// cmpl	$0x9A000000, %eax
-//	jb	1f
-//
-//	movl	$1, %cs:ABS_START(tmp_int13_vector)	/* invalidate it if the first ip is not 0x100 */
-//	cmpw	$0x100, %ax
-//	jne	1f
-//	testl	$0x3F0000, %eax
-//	jnz	1f
-//
-//	/* check our int13 signature "$INT13SFGRUB4DOS" */
-//	pushw	%ds
-//	pushw	%bx
-//	pushw	%cx
-//	xorw	%cx, %cx
-//	pushl	%eax
-//	popw	%bx			/* BX=0x100 */
-//	popw	%ds			/* int13 handler segment */
-//	cmpl	$0x544E4924, 0x3(%bx)	/* $INT */
-//	setnz	%cl
-//	orb	%cl, %ch
-//	cmpl	$0x46533331, 0x7(%bx)	/* 13SF */
-//	setnz	%cl
-//	orb	%cl, %ch
-//	cmpl	$0x42555247, 0xB(%bx)	/* GRUB */
-//	setnz	%cl
-//	orb	%cl, %ch
-//	cmpl	$0x534F4434, 0xF(%bx)	/* 4DOS */
-//	setnz	%cl
-//	orb	%cl, %ch
-//	testw	%cx, %cx
-//	popw	%cx
-//	popw	%bx
-//	popw	%ds
-//	jnz	1f
-//
-//	/* check if the segment value matches low memsize at 40:13 */
-//	pushw	%ds
-//	pushw	%bx
-//	xorw	%ax, %ax
-//	movw	%ax, %ds	/* DS=0 */
-//	movw	0x413, %ax	/* AX=mem size in KB */
-//	shlw	$6, %ax		/* AX=mem size in paragraphs */
-//	movw	%ax, %bx	/* BX=mem size in paragraphs */
-//	rorl	$16, %eax	/* EAX hi word=mem size in paragraphs */
-//	cmpw	%ax, %bx
-//	popw	%bx
-//	popw	%ds
-//	jne	1f
-//
-//	/* EAX hi word=AX=mem size in paragraphs */
-//
-//	/* this was a disk emulation made by an old grub4dos. */
-//	movw	$0x100, %ax
-//	movl	%eax, %cs:ABS_START(tmp_int13_vector)
-//	jmp	1f
-//3:
-//	cmpl	$ABS_START(bios_interrupt_vector_table + 0x54), %cs:ABS_START(tmp_vector) // int 15
-//	jne	1f
-//
-//	cmpl	$0, %cs:ABS_START(tmp_int15_vector)
-//	jne	1f
-//
-//	cmpl	$1, %cs:ABS_START(tmp_int13_vector)
-//	jbe	1f
-//
-//	rorl    $16, %eax
-//	cmpw	%ax, %cs:ABS_START(tmp_int13_vector + 2)
-//	jne	1f
-//
-//	rorl    $16, %eax
-//	movl	%eax, %cs:ABS_START(tmp_int15_vector)
-//
-//	jmp	1f
 2:
 	/* calculate linear address of CS:IP in EAX */
 
@@ -9902,6 +11193,7 @@ int1_handler:
 	/* It could hang when we call int 08 on some machines, so we end it. */
 	/* It could hang when we call int 76 on some machines, so we end it. */
 	/* It could hang when we call int 05 on some machines, so we end it. */
+	/* It might cause OS boot failure when we call int 0F on some machines, so we end it. */
 
 	/* %cs:ABS_START(tmp_vector) stores DI which points to the current vector */ 
 
@@ -9910,6 +11202,17 @@ int1_handler:
 	//popl	%cs:ABS_START(tmp_vector)
 	xchgl	%eax, %cs:ABS_START(tmp_vector)
 
+	/* current stack
+	 *      BP +12:		Flags for the iret
+	 *      BP + 8:		return address for the iret
+	 *      BP + 6:		Flags
+	 *      BP + 2:		CS:IP of next instruction
+	 *      BP    :		old BP
+	 *      BP - 4:		old EAX
+	 */
+
+
+#if 1
 	cmpl	$ABS_START(bios_interrupt_vector_table) + 0x08, %eax
 	je	fault_recovery_handler	/* it is int 02, stop now */
 	cmpl	$ABS_START(bios_interrupt_vector_table) + 0x20, %eax
@@ -9918,8 +11221,26 @@ int1_handler:
 	je	fault_recovery_handler	/* it is int 76, stop now */
 	cmpl	$ABS_START(bios_interrupt_vector_table) + 0x14, %eax
 	je	fault_recovery_handler	/* it is int 05, stop now */
+	cmpl	$ABS_START(bios_interrupt_vector_table) + 0x3C, %eax
+	je	fault_recovery_handler	/* it is int 0F, stop now */
 
-	/* not int 02, 08, 76, 05 continue */
+	/* not int 02, 08, 76, 05, 0F, continue */
+#else
+
+	/* Don't track into ROM. Return now. */
+
+	/* clear the TF flag */
+	andb	$0xFE, 13(%bp)
+	
+	/* restore registers */	
+	popl	%eax
+	popw	%bp
+
+	addw	$6, %sp
+
+	iret
+	//jmp	fault_recovery_handler	/* stop for INTs */
+#endif
 
 4:
 
@@ -10067,7 +11388,7 @@ fault_recovery_handler:
 	popfl			#; CLD, CLI, Clear TF and many more...
 
 	//cli		/* marked off 2008-08-04 */
-	sti		/* added 2008-08-04 */
+	//sti		/* added 2008-08-04, commented out 2010-05-25 */
 	movw	%cs:ABS_START(original_registers), %ds
 	movw	%cs:ABS_START(original_registers) + 4, %es
 	//movw	%cs:ABS_START(original_registers) + 8, %ss
@@ -10084,6 +11405,10 @@ fault_recovery_handler:
 	ret
 
 	/* never come here. */
+
+int2_handler:
+
+	/* do nothing for NMI */
 
 	iret
 
@@ -10153,33 +11478,52 @@ restore_BDA_EBDA:
 	movw	$0xA000, %ax
 1:
 
+	/* if MS-DOS changed EBDA, then AX should be small. */
+	cmpw	$0x4000, %ax
+	jb	1f
+	ret			/* CF=0, success. */
+1:
+
+	/* MS-DOS would only move EBDA if
+	 * 1.	EBDA is 1K.
+	 * 2.	Low mem size is 639K.
+	 */
+
 	movw	%ax, %cx	/* CX=EBDA segment */
+	movw	$0x053C, %si	/* points to conventional memory size in KB */
+	lodsl
+	cmpl	$0x9FC0027F, %eax
+	jne	invalid_EBDA
 	movw	$0x0413, %si	/* points to conventional memory size in KB */
 	lodsw
 	cmpw	$0x0280, %ax	/* 0x280 == 640 */
-	ja	invalid_EBDA	/* too much conventional memory */
+	//ja	invalid_EBDA	/* too much conventional memory */
+	jne	invalid_EBDA
 
 	shlw	$0x06, %ax
 	movw	%ax, %dx	/* conventional memory size in paragraphs */
 
-	xorb	%al, %al
-	cmpw	$0xA000, %cx
-	jz	1f		#; no EBDA exists
-
-	movw	%cx, %ds	/* DOS currently used EBDA segment */
-	xorw	%si, %si	/* the first byte of the EBDA ... */
-	lodsb			/* 	...is the EBDA size in KB */
-	cmpb	$0x80, %al	/* EBDA size greater than 128K ? */
-	ja	invalid_EBDA	/* EBDA too large */
-
-	orb	%al, %al	/* EBDA size is 0 ? */
-	jz	invalid_EBDA	/* EBDA should not be 0 in length */
-1:
-	movw	$0x0280, %bx
-	subb	%al, %bl	/* BX is the calculated low mem in K */
-	shlw	$0x06, %bx	/* BX is the calculated EBDA segment */
-	cmpw	%bx, %cx	/* CX is currently used EBDA segment */
-	jb	1f		/* MSDOS had moved EBDA to low, jump */
+//	xorb	%al, %al
+//	cmpw	$0xA000, %cx
+//	jz	1f		#; no EBDA exists
+//
+//	movw	%cx, %ds	/* DOS currently used EBDA segment */
+//	xorw	%si, %si	/* the first byte of the EBDA ... */
+//	lodsb			/* 	...is the EBDA size in KB */
+//	cmpb	$0x80, %al	/* EBDA size greater than 128K ? */
+//	ja	invalid_EBDA	/* EBDA too large */
+//
+//	orb	%al, %al	/* EBDA size is 0 ? */
+//	jz	invalid_EBDA	/* EBDA should not be 0 in length */
+//1:
+//	movw	$0x0280, %bx
+//	subb	%al, %bl	/* BX is the calculated low mem in K */
+//	shlw	$0x06, %bx	/* BX is the calculated EBDA segment */
+//	cmpw	%bx, %cx	/* CX is currently used EBDA segment */
+//	jb	1f		/* MSDOS had moved EBDA to low, jump */
+	movw	$0x9FC0, %bx
+	movb	$1, %al
+	jmp	1f
 
 	/* BX should be equal to CX, so EBDA needn't be restored.
 	 *
@@ -10252,11 +11596,12 @@ restore_BDA_EBDA:
 	/* CX = currently used EBDA segment, and CX < BX */
 	/* DX = conventional memory size in paragraphs, usually 0xA000 */
 
-	/* if MS-DOS would have changed EBDA, then CX should be small. */
-	cmpw	$0x4000, %cx
-	jb	1f
-	ret
-1:
+//	/* if MS-DOS would have changed EBDA, then CX should be small. */
+//	cmpw	$0x4000, %cx
+//	jb	1f
+//	ret
+//1:
+	movw	%cx, %ds
 	movw	%bx, %es	/* ES is the calculated EBDA segment */
 	shlw	$9, %ax		/* AX *= 512 */
 	movw	%ax, %cx	/* EBDA size in words */
@@ -10275,17 +11620,27 @@ restore_BDA_EBDA:
 	movw	$0x0413, %di
 	shrw	$6, %ax
 	stosw			/* restore the BDA field of low mem size */
+	clc
 	ret
 
 invalid_EBDA:
-	xorw	%ax, %ax	/* AX == 0 means invalid EBDA segment */
-	movw	%ax, %es	/* DI string operations use ES == 0 */
-	movw	$0x040e, %di	/* let EBDA segment be invalid */
-	stosw			/* store 0 to 0000:040e */
-	movw	$0x0413, %di	/* let lower memory size at 0x413 ... */
-	movw	$0x0280, %ax	/* 	... be 640K (0x280 == 640) */
-	stosw			/* store 640 to 0000:0413 */
+	//xorw	%ax, %ax	/* AX == 0 means invalid EBDA segment */
+	//movw	%ax, %es	/* DI string operations use ES == 0 */
+	//movw	$0x040e, %di	/* let EBDA segment be invalid */
+	//stosw			/* store 0 to 0000:040e */
+	//movw	$0x0413, %di	/* let lower memory size at 0x413 ... */
+	//movw	$0x0280, %ax	/* 	... be 640K (0x280 == 640) */
+	//stosw			/* store 640 to 0000:0413 */
+	stc			/* CF=1, failure. */
 	ret
+
+failed_restore_BDA_EBDA:
+
+	movw	%cs, %ax
+	movw	%ax, %ds
+	movw	%ax, %es
+	movl	$ABS_START(failed_BDA_EBDA_string), ABS_PSP(error_message)
+	jmp	message_exit1
 
 move_stage2_image:
 

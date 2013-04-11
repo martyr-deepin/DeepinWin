@@ -75,6 +75,7 @@ char config_file[128] = "/boot/grub/menu.lst"; /* FIXME: arbitrary */
 unsigned long linux_text_len = 0;
 char *linux_data_tmp_addr = 0;
 char *linux_data_real_addr = 0;
+char *linux_bzimage_tmp_addr = 0;
 struct apm_info apm_bios_info;
 
 /* Emulation requirements. */
@@ -308,7 +309,7 @@ big_linux_boot (void)
 
 /* booting a multiboot executable */
 void
-multi_boot (int start, int mb_info)
+multi_boot (int start, int mb_info, int dummy1, int dummy2, int dummy3, int dummy4, int dummy5)
 {
   stop ();
 }
@@ -749,7 +750,7 @@ console_setcolorstate (color_state state)
 }
 
 void
-console_setcolor (int normal_color, int highlight_color)
+console_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color)
 {
   /* Nothing to do.  */
 }
@@ -900,6 +901,7 @@ hex_dump (void *buf, size_t size)
 
   while (size > 0)
     {
+#if 0
       /* high 4 bits */
       int hi = *ptr >> 4;
       /* low 4 bits */
@@ -908,6 +910,9 @@ hex_dump (void *buf, size_t size)
       /* grub_printf does not handle prefix number, such as %2x, so
 	 format the number by hand...  */
       grub_printf ("%x%x", hi, low);
+#else
+      grub_printf ("%02X", *ptr);
+#endif
       column += 2;
       count++;
       ptr++;
@@ -1272,9 +1277,9 @@ hercules_setcolorstate (color_state state)
 }
 
 void
-hercules_setcolor (int normal_color, int highlight_color)
+hercules_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color)
 {
-  console_setcolor (normal_color, highlight_color);
+  console_setcolor (normal_color, highlight_color, helptext_color, heading_color);
 }
 
 int

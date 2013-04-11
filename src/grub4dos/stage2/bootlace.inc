@@ -2357,21 +2357,76 @@
 	/* end copy MBR and BPB to sector 63 */
 
 	/* modify partition entry for sector 0(MBR) */
-	movl	PRE(cs)ABS(mbr_free_sectors), %eax
-	movl	$MBR(0), %esi
 	movl	%ebx, %edi		#; save file descriptor
+	movl	$MBR(0), %esi
 	movl	$0x1B6, %ebx
 1:
+	movl	PRE(cs)ABS(mbr_free_sectors), %eax
 	addl	$0x10, %ebx
 	cmpl	$0x1F6, %ebx
 	ja	1f
 	cmpl	(iBX, iSI), %eax	#; mbr_free_sectors
-	jne	1b
+	jne	3f
 	movb	$0, -7(iBX, iSI)	#; CHS start head number
 	movw	$0x21, -6(iBX, iSI)	#; CHS start sector number
-	movl	$0x20, (iBX, iSI)	#; LBA start sector number
 	subl	$0x20, 4(iBX, iSI)	#; LBA total sectors
 	addl	%eax, 4(iBX, iSI)	#; LBA total sectors
+	xorl	%edx, %edx
+	movl	%edx, -3(iBX, iSI)	#; clear end CHS
+	movl	$0x20, (iBX, iSI)	#; LBA start sector number
+	
+	movl	(iBX, iSI), %eax
+	addl	4(iBX, iSI), %eax
+	decl	%eax			#; EDX:EAX=LBA end sector number
+	/* translate LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -2(iBX, iSI)	#; CHS end sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -3(iBX, iSI)	#; CHS end head number
+	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
+	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
+	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
+3:
+	/* start LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	cmpl	$0x20, %eax
+	jb	1b
+	/* translate start LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -6(iBX, iSI)	#; CHS start sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -7(iBX, iSI)	#; CHS start head number
+	movb	%al, -5(iBX, iSI)	#; CHS start cylinder lo byte
+	shlb	$6, %ah			#; CHS start cylinder hi 2 bits
+	orb	%ah, -6(iBX, iSI)	#; put in the byte for CHS start sector number
+	/* end LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	addl	4(iBX, iSI), %eax
+	decl	%eax			#; EDX:EAX=LBA end sector number
+	/* translate end LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -2(iBX, iSI)	#; CHS end sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -3(iBX, iSI)	#; CHS end head number
+	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
+	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
+	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
 1:
 	/* end modify partition entry for sector 0(MBR) */
 
@@ -2396,15 +2451,15 @@
 	/* end modify BPB for sector 32 */
 
 	/* modify partition entry for sector 32 */
-	movl	PRE(cs)ABS(mbr_free_sectors), %eax
 	movl	$MBR(0x4000), %esi
 	movl	$0x1B6, %ebx
 1:
+	movl	PRE(cs)ABS(mbr_free_sectors), %eax
 	addl	$0x10, %ebx
 	cmpl	$0x1F6, %ebx
 	ja	1f
 	cmpl	(iBX, iSI), %eax	#; mbr_free_sectors
-	jne	1b
+	jne	3f
 	movb	$0, -7(iBX, iSI)	#; CHS start head number
 	movw	$0x20, -6(iBX, iSI)	#; CHS start sector number
 	subl	$0x3F, 4(iBX, iSI)	#; LBA total sectors
@@ -2428,6 +2483,44 @@
 	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
 	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
 	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
+3:
+	/* start LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	subl	$0x20, %eax
+	jb	1b
+	movl	%eax, (iBX, iSI)
+	/* translate start LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -6(iBX, iSI)	#; CHS start sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -7(iBX, iSI)	#; CHS start head number
+	movb	%al, -5(iBX, iSI)	#; CHS start cylinder lo byte
+	shlb	$6, %ah			#; CHS start cylinder hi 2 bits
+	orb	%ah, -6(iBX, iSI)	#; put in the byte for CHS start sector number
+	/* end LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	addl	4(iBX, iSI), %eax
+	decl	%eax			#; EDX:EAX=LBA end sector number
+	/* translate end LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -2(iBX, iSI)	#; CHS end sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -3(iBX, iSI)	#; CHS end head number
+	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
+	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
+	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
 1:
 	/* end modify partition entry for sector 32 */
 
@@ -2452,15 +2545,15 @@
 	/* end modify BPB for sector 63 */
 
 	/* modify partition entry for sector 63 */
-	movl	PRE(cs)ABS(mbr_free_sectors), %eax
 	movl	$MBR(0x7E00), %esi
 	movl	$0x1B6, %ebx
 1:
+	movl	PRE(cs)ABS(mbr_free_sectors), %eax
 	addl	$0x10, %ebx
 	cmpl	$0x1F6, %ebx
 	ja	1f
 	cmpl	(iBX, iSI), %eax	#; mbr_free_sectors
-	jne	1b
+	jne	3f
 	movb	$0, -7(iBX, iSI)	#; CHS start head number
 	movw	$0x21, -6(iBX, iSI)	#; CHS start sector number
 	//subl	$0x5F, 4(iBX, iSI)	#; LBA total sectors
@@ -2484,6 +2577,44 @@
 	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
 	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
 	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
+3:
+	/* start LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	subl	$0x3f, %eax
+	jb	1b
+	movl	%eax, (iBX, iSI)
+	/* translate start LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -6(iBX, iSI)	#; CHS start sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -7(iBX, iSI)	#; CHS start head number
+	movb	%al, -5(iBX, iSI)	#; CHS start cylinder lo byte
+	shlb	$6, %ah			#; CHS start cylinder hi 2 bits
+	orb	%ah, -6(iBX, iSI)	#; put in the byte for CHS start sector number
+	/* end LBA */
+	xorl	%edx, %edx
+	movl	(iBX, iSI), %eax	#; EDX:EAX=LBA start sector number
+	addl	4(iBX, iSI), %eax
+	decl	%eax			#; EDX:EAX=LBA end sector number
+	/* translate end LBA to CHS */
+	movl	$63, %ecx		#; sectors per track=63
+	divl	%ecx			#; EAX=track number, EDX+1=sector number
+	incw	%dx
+	movb	%dl, -2(iBX, iSI)	#; CHS end sector number
+	xorl	%edx, %edx		#; EDX:EAX=track number
+	movl	$255, %ecx		#; heads=255
+	divl	%ecx			#; EAX=cylinder number, EDX=head number
+	movb	%dl, -3(iBX, iSI)	#; CHS end head number
+	movb	%al, -1(iBX, iSI)	#; CHS end cylinder lo byte
+	shlb	$6, %ah			#; CHS end cylinder hi 2 bits
+	orb	%ah, -2(iBX, iSI)	#; put in the byte for CHS end sector number
+	jmp	1b
 1:
 	/* end modify partition entry for sector 63 */
 

@@ -31,6 +31,8 @@ static int herc_y;
 static int herc_standard_color = A_NORMAL;
 static int herc_normal_color = A_NORMAL;
 static int herc_highlight_color = A_REVERSE;
+static int herc_helptext_color = A_NORMAL;
+static int herc_heading_color = A_NORMAL;
 static int herc_current_color = A_NORMAL;
 static color_state herc_color_state = COLOR_STATE_STANDARD;
 static int herc_cursor_state = 1;
@@ -152,6 +154,12 @@ hercules_setcolorstate (color_state state)
     case COLOR_STATE_HIGHLIGHT:
       herc_current_color = herc_highlight_color;
       break;
+    case COLOR_STATE_HELPTEXT:
+      herc_current_color = herc_helptext_color;
+      break;
+    case COLOR_STATE_HEADING:
+      herc_current_color = herc_heading_color;
+      break;
     default:
       herc_current_color = herc_standard_color;
       break;
@@ -161,10 +169,12 @@ hercules_setcolorstate (color_state state)
 }
 
 void
-hercules_setcolor (int normal_color, int highlight_color)
+hercules_setcolor (int normal_color, int highlight_color, int helptext_color, int heading_color)
 {
   herc_normal_color = normal_color;
   herc_highlight_color = highlight_color;
+  herc_helptext_color = helptext_color;
+  herc_heading_color = heading_color;
   
   hercules_setcolorstate (herc_color_state);
 }

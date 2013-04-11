@@ -54,6 +54,11 @@ EXEEXT   = .exe
 SYSSTR   = w32
 endif
 
+ifneq ($(findstring Linux,$(OSTYPE)),)
+CFLAGS   += -DLINUX
+AFLAGS   += -DLINUX
+endif
+
 USE_ZIP  ?= y
 
 ifeq ($(USE_ZIP),y)
@@ -94,7 +99,7 @@ clean:
 	rm -f $(all_EXES) $(all_BINS) $(extra_CLEAN) *.o *.d  # Cleanup
 
 $(CURDIR)/Makefile:
-	echo -e "SRCDIR:=$(SRCDIR)\ninclude $(SRCDIR)$(notdir $(firstword $(MAKEFILE_LIST)))" > $@ # Create Makefile
+	echo "SRCDIR:=$(SRCDIR)\ninclude $(SRCDIR)$(notdir $(firstword $(MAKEFILE_LIST)))" > $@ # Create Makefile
 
 %$(EXEEXT): %.c
 	$(CC) $(CFLAGS) -MMD -o $@ $<

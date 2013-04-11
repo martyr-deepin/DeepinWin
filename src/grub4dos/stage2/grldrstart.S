@@ -149,30 +149,14 @@ _start1:
 #endif	/* ! defined(GRLDR_MBR) && (! defined(GRLDR_INSTALL)) */
 
 1:
+	cli
+	xorw	%bx, %bx
+	movw	%bx, %ss
+	movw	$0x580, %sp		/* temp safe stack space */
 	call	1f
-
-#if (! defined(GRLDR_MBR)) && (! defined(GRLDR_INSTALL))
-
-	. = _start1 + 0x43
-
-#else
-
-	. = _start1 + 0x63
-
-#endif	/* ! defined(GRLDR_MBR) && (! defined(GRLDR_INSTALL)) */
-
 1:
 	popw	%bx			/* Instruction Pointer of 1b */
-
-#if (! defined(GRLDR_MBR)) && (! defined(GRLDR_INSTALL))
-
 	subw	$(1b - _start1), %bx	/* CS:BX=_start1 */
-
-#else
-
-	subw	$(1b - _start1), %bx	/* CS:BX=_start1 */
-
-#endif	/* ! defined(GRLDR_MBR) && (! defined(GRLDR_INSTALL)) */
 
 	shrw	$4, %bx
 	movw	%cs, %ax
@@ -215,21 +199,10 @@ _start1:
 	 * no-emulation mode cdrom.
 	 */
 
-	testb	$0x7F, cdrom_check - _start1	/* is it 0x00 or 0x80? */
-	jz	1f			/* yes, cdrom_check not found */
-	call	cdrom_check		/* no, cdrom_check is present */
+	cmpl	$0xBCD38E58, cdrom_check - _start1	/* POP AX; MOV SS,BX; MOV SP,?? */
+	jnz	1f			/* cdrom_check not found */
+	call	cdrom_check		/* cdrom_check present */
 1:
-//	/* DS:0000=_start1 */
-//
-//	/* Let CS:0000=_start1 */
-//	pushw	%ds
-//
-//	#;pushw	$(1f - _start1)
-//	.byte	0x6A, (1f - _start1)
-//
-//	lret
-//	. = . - (. - _start1) / 0x80
-//1:
 #else
 	/* BX:0000=_start1 */
 
@@ -250,22 +223,13 @@ _start1:
 
 	/* we are loaded by BIOS or another boot loader */
 
+#define	MONITOR	0x8410		/* for 4-sector NTFS boot record */
 #define GRLDR_CS 0x2000		/* grldr code segment */
-				/* hope this segment never be used by all */
-				/*	subsequent partition boot records */
-#if 0
-	/* for single sector boot record */
-#define	MONITOR	0x7e10
-#else
-	/* for 4-sector NTFS boot record */
-#define	MONITOR	0x8410
-#endif
 
-//	cli
 	pushw	$GRLDR_CS
 	popw	%ss
 	movw	$0x9000, %sp	/* SS:SP=0x9d000, keep away from EBDA data */
-//	sti
+	sti
 	
 	/* Extended BIOS Data Area should not take up space below 0x9d000 */
 	
@@ -279,38 +243,26 @@ _start1:
 
 #define FS_BOOT	0xd00		/* segment of partition boot track */
 
-	xorw	%cx, %cx
-	pushw	%cx		/* CX=0 */
+	pushw	%ss		/* SS=CS */
+	popw	%es		/* ES=CS */
+
+//	movw	$(((pre_stage2_start - _start1) >> 9) + 0x200), %ax
+//	movw	%ax, %bp	/* save AX to BP: read 1 track */
+//	xorw	%bx, %bx	/* ES=CS */
+	movw	$((pre_stage2_start - _start1) >> 9), %cx
+1:
+	movw	$0x0201, %ax	/* read 1 sector */
+	movw	%cx, %bx
+	decw	%bx
+	shlw	$9, %bx
 	movw	$0x0080, %dx
-//	pushw	%dx
-	movb	$8, %ah		/* read drive parameters changes DX,ES,DI,BX */
+	pushw	%cx
+	pushw	%bx
 	call	int13
-//	stc
-//	int	$0x13
-//	popw	%dx
-	popw	%ax		/* AX=0 */
-
-	pushw	%ss		/* SS=0x9400 */
-	popw	%es		/* ES=0x9400 */
-
+	popw	%bx
+	popw	%cx
 	jc	1f
-
-	andb	$63, %cl	/* AL=sectors per track, CF cleared */
-
-	stc
-	jz	1f
-
-	xchgw	%ax, %cx	/* this moves CL to AL, and CX=0 */
-	movb	$0x02, %ah
-	movw	%ax, %bp	/* save AX to BP: read 1 track */
-	xorw	%bx, %bx	/* ES already has a known value of 0x9400 */
-	incw	%cx
-//	pushw	%dx
-	call	int13
-//	stc
-//	int	$0x13		/* read master boot track to ES:0000 */
-//	popw	%dx
-	jc	1f
+	loop	1b
 	negb	%ah		/* set CF=1 if non-zero */
 1:
 	pushw	%cs		/* DS=0 */
@@ -406,28 +358,31 @@ disk_serial_number_structure_end:
 
 	pushal
 
-	movw	0x18, %cx	/* BPB sectors per track at offset 0x18 */
+	//movw	0x18, %cx	/* BPB sectors per track at offset 0x18 */
 
-	cmpw	$0x3F, %cx
-	ja	3f
+	//cmpw	$0x3F, %cx
+	//ja	3f
 
-	/* CH=0 */
+	///* CH=0 */
 
-	movb	$(((pre_stage2_start - _start1) >> 9) - 1), %al
-	cmpb	%al, %cl
-	jbe	3f
+	//movb	$(((pre_stage2_start - _start1) >> 9) - 1), %al
+	//cmpb	%al, %cl
+	//jbe	3f
 
-	//decw	%ax		/* skip the first sector already loaded */
-	
 	movw	$3, %di		/* retry 3 times on read failure */
 2:
-	movb	$2, %ah		/* BIOS disk read */
+	/* skip the first sector already loaded, AH=2 for BIOS disk read */
+	movw	$((((pre_stage2_start - _start1) >> 9) - 1) + 0x200), %ax
 	cwd			/* DX=0 for floppy head 0 */
 	movw	$0x200, %bx	/* ES:BX immediately follow this sector */
-	movb	$2, %cl		/* CH=0,skip the first sector already loaded */
+	movw	$2, %cx		/* skip the first sector already loaded */
 
 	call	read_disk_with_reset_and_dec_di
+//#if (defined(GRLDR_MBR)) || (defined(GRLDR_INSTALL))
+//111:	jmp	111b
+//#else
 	jnc	3f
+//#endif
 
 	jnz	2b
 3:
@@ -437,9 +392,9 @@ disk_serial_number_structure_end:
 	jne	Error_or_prev_MBR	/* Missing helper */
 
 	/* Helper is loaded from floppy, so we set floppy as preferred. */
-	//movw	$0xff00, 0x06
-	//movw	%cx, 0x06	/* CX=0 */
-	call	set_floppy_preferred
+	//call	set_floppy_preferred
+	movw	$0xff00, 0x06	/* preferred drive=0, partition=0xff */
+	andb	$0xFE, 0x02	/* bit0=0, enable GRLDR search on floppy */
 1:
 #endif
 
@@ -460,14 +415,16 @@ disk_serial_number_structure_end:
 	//stc
 	jz	helper_call_c
 	
-	/* use BP to calculate the sectors to read within 1 track */
-	subw	%bp, %ax
-	decw	%ax		/* decb	%al */
-	negb	%al		/* AL=sectors upto the end of the track */
+	///* use BP to calculate the sectors to read within 1 track */
+	////subw	%bp, %ax
+	//subb	$4, %al
+	//decw	%ax		/* decb	%al */
+	//negb	%al		/* AL=sectors upto the end of the track */
+	movb	$0x01, %al
 7:
 	movw	$3, %di		/* retry 3 times on read failure */
 2:
-	movb	$2, %ah
+	movb	$0x02, %ah
 	pushw	$FS_BOOT
 	popw	%es		/* ES=FS_BOOT */
 	xorw	%bx, %bx	/* read partition boot track to FS_BOOT:0000 */
@@ -543,19 +500,19 @@ add_sub_si:
 try_floppy:
 
 	movw	$0x31b2, %si	/* a value big enough */
-	movb	$8, %ah		/* read drive parameters changes DX,ES,DI,BX */
-	cwd			/* DL=0 for floppy */
-	pushw	%dx		/* DX=0 */
-//	int	$0x13
-	call	int13
-	popw	%ax		/* AX=0 */
-	jc	5f		/* floppy failure, issue "Error" and hang */
-	cwd			/* DX=0 */
-	xchgw	%ax, %cx	/* this moves CL to AL, and CX=0 */
-	andb	$63, %al	/* AL=sectors per track */
-	jz	5f		/* invalid value. floppy failure. hangs */
-	//movw	$1, %cx
-	incw	%cx
+	//movb	$8, %ah		/* read drive parameters changes DX,ES,DI,BX */
+	//cwd			/* DL=0 for floppy */
+	//pushw	%dx		/* DX=0 */
+	//call	int13
+	//popw	%ax		/* AX=0 */
+	//jc	5f		/* floppy failure, issue "Error" and hang */
+	//cwd			/* DX=0 */
+	//xchgw	%ax, %cx	/* this moves CL to AL, and CX=0 */
+	//andb	$63, %al	/* AL=sectors per track */
+	//jz	5f		/* invalid value. floppy failure. hangs */
+	movb	$4, %al
+	movw	$1, %cx
+	xorw	%dx, %dx
 	jmp	7b
 
 5:
@@ -676,15 +633,35 @@ try_next_partition:
 #if (defined(GRLDR_MBR)) || (defined(GRLDR_INSTALL))
 read_disk_with_reset_and_dec_di:
 	pushaw
-//	int	$0x13
+////////////////////////////////////////////////////////////
+	/* ES:BX=buffer */
+	/* AH=2, AL=sectors */
+	/* CX=sector and cylinder numbers */
+	/* DH=head number, DL=drive number */
+3:
+	pushw	%ax
+	pushw	%bx
+	pushw	%cx
+	decb	%al
+	addb	%al, %cl	/* sector number */
+	shlb	$1, %al
+	addb	%al, %bh	/* buffer */
+	movb	$0x01, %al	/* AH=2 untouched */
 	call	int13
+	popw	%cx
+	popw	%bx
+	popw	%ax
+	jc	3f
+	decb	%al
+	jnz	3b
+3:
+////////////////////////////////////////////////////////////
 	popaw
 
 	jnc	3f
 
 	pushaw
 	xorw	%ax, %ax
-//	int	$0x13
 	call	int13
 	popaw
 	decw	%di
@@ -744,11 +721,14 @@ cdrom_check:
 
 	/* BX segment points to near the end of GRLDR image. */
 
-	popw	%ax	/* old return IP */
+	/* The code must begin with 0x58, 0x8E, 0xD3, 0xBC. */
+
+	popw	%ax	/* old return IP. code: 0x58 */
 
 	/* set BX as the new safe stack. */
-	movw	%bx, %ss
-	movw	$0xFFF0, %sp
+	movw	%bx, %ss	/* code: 0x8E, 0xD3 */
+	movw	$0xFFF0, %sp	/* code: 0xBC, 0xF0, 0xFF */
+	sti
 
 	pushw	%ax	/* old return IP */
 
@@ -773,11 +753,6 @@ cdrom_check:
 	popw	%es
 	movb	$0x13, (%si)
 	call	int13
-//	pushw	%ds
-//	pushw	%dx
-//	int	$0x13
-//	popw	%dx
-//	popw	%ds
 
 	/* ignore CF */
 #;	jc	2f	/* not in emulation mode */
@@ -1019,7 +994,6 @@ load_cd_sector:
 	pushal
 	movb	$0x42, %ah
 	call	int13
-//	int	$0x13
 	popal
 //	popw	%es
 //	popw	%ds
@@ -1108,9 +1082,9 @@ grldr_real_start:
 	#;//if not booted from CDROM, don't touch the boot partition number(dh)
 
 	cli
-	xorw	%ax, %ax
-	movw	%ax, %ss
-	movw	$0x0400, %sp	/* tmp use real-mode IDT as stack */
+	//xorw	%ax, %ax
+	//movw	%ax, %ss
+	//movw	$0x0400, %sp	/* tmp use real-mode IDT as stack */
 	movw	%cs, %bp	/* save CS to BP */
 	call	1f
 1:
@@ -1264,16 +1238,16 @@ grldr_real_start:
 	repz movsb	/* move file name to the config-file field of stage2 */
 1:
 
+	xorw	%ax, %ax
+	movw	%ax, %ss
+	movw	$0x2000, %sp
+
 	movw	$0x0003, %ax	/* set display mode: 80*25 color text */
 	int	$0x10
 
 	//xorw	%bx, %bx
 	//movw	$(launch_pre_stage2 - _start1), %si
 	//call	print_message	/* CS:SI points to message string */
-
-	//xorw	%ax, %ax
-	//movw	%ax, %ss
-	//movw	$0x2000, %sp
 
 	//sti
 
@@ -3740,7 +3714,7 @@ boot_error_ext2:
 #define LOADSEG_NT	0x2000
 
 #define MMFT_BASE	0x2000
-#define MMFT_EMFT	(MMFT_BASE +1024)
+#define MMFT_EMFT	(MMFT_BASE + 1024)
 #define MMFT_EBUF	(MMFT_BASE + 2048)
 
 #define CMFT_BASE	(MMFT_BASE + 6144)
@@ -4788,6 +4762,7 @@ ntfs_read_data:
 //     SI points to the next unhandled byte
 
 ntfs_runlist_read_data:
+#if 0
 	pushw	%cx
 	orb	%cl, %cl
 	jnz	1f
@@ -4805,6 +4780,24 @@ ntfs_runlist_read_data:
 	add	$4, %cl
 	shlb	$3, %cl
 	ret
+#else
+	xorl	%eax, %eax
+	testb	%cl, %cl
+	jz	2f
+	pushw	%cx
+1:
+	lodsb	(%si), %al
+	rorl	$8, %eax
+	decb	%cl
+	jnz	1b
+
+	popw	%cx
+	negb	%cl
+	add	$4, %cl
+	shlb	$3, %cl
+2:
+	ret
+#endif
 
 NTFS_Run_Overflow_Error:
 	movb	$NTFS_Run_Overflow_Error_Code, %al
@@ -4992,6 +4985,7 @@ ntfs_decomp_block:
 	pushw	%ds
 	pushw	%si
 
+	cld		# added 2009-10-06 by tinybit
 	pushl	%eax
 	call	lin_to_seg
 	popw	%si
@@ -5024,10 +5018,10 @@ ntfs_decomp_block:
 	subl	%ecx, %edx
 	jnz	1b
 
-	popw	%di
-	popw	%es
-	popw	%si
-	popw	%ds
+	popw	%di	# Why these POPs should be in reverse order?
+	popw	%es	# Seems a comment needed.  -- tinybit
+	popw	%si	#
+	popw	%ds	#
 
 1:
 	xorl	%edx, %edx			// edx - copied bytes
@@ -5510,7 +5504,8 @@ helper_start:
 	popw	%ds
 
 	testb	%dl, %dl
-	jns	1f			/* floppy, use normal CHS mode */
+	//jns	1f			/* floppy, use normal CHS mode */
+	jns	2f			/* floppy, use normal CHS mode */
 
 	cmpw	$0x1f2, %si		/* is it a primary partition? */
 	ja	2f			/* no, it is an extended partition */
@@ -5523,17 +5518,21 @@ helper_start:
 	//cmpl	$0xfffffe00, %eax	/* check the starting CHS */
 	//jb	1f			/* use normal CHS mode */
 
-	cmpw	$0xFFFF, 0x08		/* geometry determined? */
-	jne	3f			/* yes, skip */
+	pushaw		/* <------ at least DL,SI need to be saved */
+	cmpw	$0xFFFF, 0x08	/* geometry determined? */
+	jne	3f		/* yes, skip */
 
 	/* get CHS total number of sectors */
-	pushw	%es
-	pushw	%ds
 	movb	$8, %ah		/* read drive parameters changes DX,ES,DI,BX */
-	//movb	$0x80, %dl	/* BIOS drive number is in DL */
+
+	/* should not use "call int13", because "int13" will restore DX,
+	 * and the DH returned by "int $0x13" thus be destroyed.
+	 */
+	pushw	%ds
+	pushw	%es
 	int	$0x13
-	popw	%ds
 	popw	%es
+	popw	%ds
 	jc	3f		/* failed */
 	testb	$63, %cl
 	jz	3f		/* failed */
@@ -5543,6 +5542,11 @@ helper_start:
 	movb	%cl, 0x08	/* Smax */
 
 3:
+	popaw		/* <------ at least DL,SI need to be restored */
+	//xorl	%ebx, %ebx
+	movl	$32, %ebx
+	testb	%dl, %dl
+	jns	3f			/* floppy */
 
 	/* check the partition's starting LBA */
 	movl	4(%si), %ebx
@@ -5550,7 +5554,7 @@ helper_start:
 
 	testl	%ebx, %ebx
 	je	1f
-
+3:
 	cmpb	$0x42, 0x00	/* EBIOS present? */
 	je	3f		/* yes, skip the CHS mode int13 fix */
 
@@ -5580,12 +5584,16 @@ helper_start:
 	pushw	%es
 	pushl	%ebx
 
-	pushl	%ebx
+	pushl	%ebx		/* LBA */
+	xorw	%bx, %bx	/* buffer in ES:BX=FS_BOOT:0 */
+	movw	$4, %cx		/* number of sectors to read in CX */
+	testb	%al, %al
+	js	2f		/* hard drive */
+	movw	$1, %cx		/* read 1 sector of sector 32  */
+	movw	$0x4000, %bx
+2:
 	popw	%ax
 	popw	%dx		/* DX:AX=LBA */
-
-	xorw	%bx, %bx	/* buffer in ES:BX=FS_BOOT:0 */
-	movw	$63, %cx	/* number of sectors to read in CX */
 
 	call	readDisk_12_16	/* CX=0, AX,DX,ES changed */
 
@@ -5858,28 +5866,6 @@ helper_start:
 3:
 
 #if 0
-	pushw	%ds
-	pushw	%es
-	pushw	%bx
-	pushw	%dx
-	movb	$8, %ah		/* read drive parameters changes DX,ES,DI,BX */
-	movb	$0x80, %dl	/* BIOS drive number is in DL */
-	int	$0x13
-//	call	int13
-	xchgw	%ax, %dx	/*movw	%dx, %ax*/ //AH=max head number
-	popw	%dx
-	popw	%bx
-	popw	%es
-	popw	%ds
-	jc	3f
-	andb	$63, %cl
-	jz	3f
-	movb	%cl, %es:0x18(%bx)
-	shrw	$8, %ax		//AX=max head number
-	incw	%ax		//AX=total heads
-	movw	%ax, %es:0x1a(%bx)
-3:
-//#else
 	testb	%dl, %dl
 	jns	3f			/* floppy */
 	popw	%di			/* DI points to old entry in MBR */
@@ -5933,8 +5919,48 @@ helper_start:
 1:
 	#; It is not EXT2. Check for FAT12/16/32/NTFS.
 
-	/* DS=ES=FS_BOOT */
+	/* DS=ES=FS_BOOT, SI=0 */
+	testb	%dl, %dl
+	js	3f
+	movb	$0xff, %cs:0x1bc	/* partition number for floppy */
+	movl	0x401C, %eax
+	cmpl	$0x20, %eax
+	jne	3f
 
+	xorw	%bx, %bx	/* partition number */
+	movw	$0x1C6, %di
+	movw	$4, %cx
+8:
+	cld
+	scasl
+	jne	2f
+	incw	%si
+	movb	%bl, %cs:0x1bc	/* partition number */
+2:
+	addw	$12, %di
+	incw	%bx
+	loop	8b
+
+	decw	%si
+	jnz	3f
+	movb	$0, %al
+	movw	$0x0B, %di
+	movw	$(0x5A - 0x0B), %cx
+	cld
+	repz scasb
+	jnz	3f
+	movw	$0x400B, %si
+	movw	$0x0B, %di
+	movw	$(0x5A - 0x0B), %cx
+	//movw	$0x4000, %si
+	//movw	$0x0000, %di
+	//movw	$0x0100, %cx
+	cld
+	repz movsw
+	xchgb	%al, 0x1C
+	addw	%ax, 0x0E
+3:
+	xorw	%si, %si
 	cmpw	$0x200, 0x0b(%si)	/* bytes per sector */
 	jne	1f			/* not a normal BPB */
 	movb	0x0d(%si), %al		/* sectors per cluster */
@@ -6068,11 +6094,11 @@ helper_start:
 	addb	$5, %al			/* AL is less than 0x80 */
 	cbw				/* AH=0 */
 	xchgw	%ax, %di		/* move AX to DI */
-	movb	$0xff, %al		/* partition=whole drive for floppy */
-	testb	%dl, %dl
-	jns	3f			/* no modification for floppy */
+//	movb	$0xff, %al		/* partition=whole drive for floppy */
+//	testb	%dl, %dl
+//	jns	3f			/* no modification for floppy */
 	movb	0x1bc, %al		/* partition number */
-3:
+//3:
 	stosb
 
 	/* fix for NTFS partition: on error go back to supervisor, offset 0x01fa */
@@ -6183,11 +6209,11 @@ helper_start:
 	addb	$5, %al			/* AL is less than 0x80 */
 	cbw				/* AH=0 */
 	xchgw	%ax, %di		/* move AX to DI */
-	movb	$0xff, %al		/* partition=whole drive for floppy */
-	testb	%dl, %dl
-	jns	3f			/* no modification for floppy */
+//	movb	$0xff, %al		/* partition=whole drive for floppy */
+//	testb	%dl, %dl
+//	jns	3f			/* no modification for floppy */
 	movb	0x1bc, %al		/* partition number */
-3:
+//3:
 	stosb
 
 	/* fix for FAT12/16/32 partition: on error go back to supervisor, offset 0x01fa */
@@ -6760,23 +6786,15 @@ boot_prev_mbr:
 	/* prepare to boot the previous MBR */
 
 	/* at this moment DS=0x9400, ES=$FS_BOOT or ES=0x9400 */
-	xorw	%ax, %ax
-	//pushw	%ax	/* AX=0, for the segment of 0000:7c00 */
+	xorw	%ax, %ax	/* AX=0, for the segment of 0000:7c00 */
 	movw	%ax, %es	/* ES=0x0000 */
 	movw	%ax, %ds	/* DS=0x0000 */
-//	pushw	%ds
-//	pushw	%es
 	movw	$0x0202, %ax	/* read 2 sectors ... */
 	movw	$0x7A00, %bx	/* ... to 0000:7A00 */
-	//pushw	%bx	/* BX=0x7c00, for the offset of 0000:7c00 */
 	movw	$0x0001, %cx	/* from the first sector ... */
 	movw	$0x0080, %dx	/* ... of the first hard drive */
-//	stc
-//	int	$0x13
 	call	int13
 	sti
-//	popw	%es
-//	popw	%ds
 	jc	1f
 	testb	%ah, %ah
 	jnz	1f
@@ -7409,10 +7427,10 @@ move_helper:
 //#endif
 
 #if (defined(GRLDR_MBR)) || (defined(GRLDR_INSTALL))
-set_floppy_preferred:
-	movw	$0xff00, 0x06	/* preferred drive=0, partition=0xff */
-	andb	$0xFE, 0x02	/* bit0=0, enable GRLDR search on floppy */
-	ret
+//set_floppy_preferred:
+//	movw	$0xff00, 0x06	/* preferred drive=0, partition=0xff */
+//	andb	$0xFE, 0x02	/* bit0=0, enable GRLDR search on floppy */
+//	ret
 
 filesystem_boot:
 	/* The partition boot record successfully modified, just boot it */
@@ -7545,7 +7563,7 @@ press_hot_key_sub1:
 	.ascii	" to boot previous MBR, any other key to start GRUB ...\0"
 
 hot_key_timeout_pre:
-	.ascii "\r\nTimeout : \0"
+	.ascii "\r\nTimeout: \0"
 
 hot_key_timeout_num:
 	.ascii "   \b\b\b\0"
@@ -7553,8 +7571,8 @@ hot_key_timeout_num:
 continue_string:
 	.ascii	"\r\nInvalid previous MBR. Press any key to start GRUB ...\0"
 
-Cannot_find_GRLDR_string:
-	.ascii	"\r\nCannot find \0"
+//Cannot_find_GRLDR_string:
+//	.ascii	"\r\nCannot find \0"
 
 prev_MBR_string:
 	.ascii	" to hold the screen, any other key to boot previous MBR ...\0"
@@ -7566,22 +7584,24 @@ drive_number_string:
 	.ascii	" in partition table of drive (hd0 ) \0"
 
 partition_boot_indicator_string:
-	.ascii	"\r\nInvalid boot indicator\0"
+//	.ascii	"\r\nInvalid boot indicator\0"
 
 partition_sectors_per_track_string:
-	.ascii	"\r\nInvalid sectors_per_track\0"
+//	.ascii	"\r\nInvalid sectors_per_track\0"
 
 partition_start_sector_string:
-	.ascii	"\r\nInvalid start_sector\0"
+//	.ascii	"\r\nInvalid start_sector\0"
 
 partition_end_sector_string:
-	.ascii	"\r\nInvalid end_sector\0"
+//	.ascii	"\r\nInvalid end_sector\0"
 
 no_boot_signature_string:
-	.ascii	"\r\nNo boot signature\0"
+//	.ascii	"\r\nNo boot signature\0"
+	.ascii	"\r\nError\0"
 
+Cannot_find_GRLDR_string:
 message_string_helper:
-	.ascii	"\r\nError: Cannot find \0"
+	.ascii	"\r\nCannot find \0"
 ctrl_alt_del_string:
 	.ascii	" in all drives. Press Ctrl+Alt+Del to restart.\0"
 
@@ -7590,13 +7610,6 @@ partition_message:
 
 EXT2_message:
 	.ascii	"EXT2: \0"
-
-#if 0
-NTFS4_message:
-	.ascii	"NTFS4: \0"
-NTFS5p_message:
-	.ascii	"NTFS5p: \0"
-#endif
 
 NTFS5_message:
 	.ascii	"NTFS5: \0"
@@ -7700,10 +7713,32 @@ real_geometry_tune:
 
 //////////////////////////////////////////////////////////////////////////////
 
-	/* get maximum sector number */
+	/* find Max sector by reading each sector on the first track. */
 
-	movw	$63, %cx	/* cylinder=0, sector=Max possible */
+	/* try the passed-in value first */
+	movw	%cs:(Sectors_passed_in - _start1), %cx	/* cylinder=0 */
+	call	check_sector_readable
+	jnc	1f
+	xorw	%cx, %cx
 1:
+	cmpw	$63, %cx
+	jnb	2f		/* this is the maximum value */
+
+	incw	%cx
+	call	check_sector_readable
+	jc	1f
+	cmpw	$63, %cx
+	jb	1b
+	jmp	2f
+1:
+	/* Max Sector = CX - 1 */
+	decw	%cx
+	cmpb	$2, %cl
+	jnb	2f
+	movb	$1, %ah		/* failure */
+	ret
+
+check_sector_readable:
 	movw	$0x5000, %ax
 	movw	%ax, %es
 	movw	%ax, %ds
@@ -7715,19 +7750,21 @@ real_geometry_tune:
 	movw	%bx, %di
 	int	$0x13
 	popaw
-	jnc	1f		/* found Max sector */
-	loop	1b
-2:
-	movb	$1, %ah		/* failure */
 	ret
-1:
 
+2:
+	cmpw	$63, %cx
+	jbe	2f
+	movw	$63, %cx
+2:
 	/* CX=Max Sector */
 	movw	%cx, %cs:(Smax_tuned - _start1)
 
 //////////////////////////////////////////////////////////////////////////////
-
+#if 0
 	/* check if we can read sectors across the track boundary */
+
+	/* first, read a track plus one sector */
 
 	movb	$0, %cs:(cross_track - _start1)
 
@@ -7747,7 +7784,7 @@ real_geometry_tune:
 	popaw
 	jc	1f		/* cross-track read is not supported */
 
-	/* read again normally */
+	/* read again normally, only the track */
 
 	movb	%cs:(Smax_tuned - _start1), %al	/* sectors to read */
 	movb	$2, %ah		/* READ */
@@ -7783,10 +7820,10 @@ real_geometry_tune:
 	jne	1f		/* cross-track read is not supported */
 	movb	$1, %cs:(cross_track - _start1)
 1:
-
+#endif
 //////////////////////////////////////////////////////////////////////////////
-
-	/* get maximum head number */
+#if 0
+	/* find Max head by reading sector 1 on each track of cylinder 0. */
 
 	movb	$0xFF, %dh	/* head=Max possible */
 1:
@@ -7811,7 +7848,7 @@ real_geometry_tune:
 
 	/* DH=Max head */
 	movb	%dh, %cs:(Hmax_tuned - _start1)
-
+#endif
 //////////////////////////////////////////////////////////////////////////////
 
 	/* tune Hmax */
@@ -7831,9 +7868,11 @@ real_geometry_tune:
 	jb	2f		/* failure */
 	ja	4f		/* success */
 
+#if 0
 	cmpb	%cs:(Hmax_tuned - _start1), %dh
 	ja	2f		/* this should not happen */
 	je	5f
+#endif
 
 	incb	%dh		/* Next Hmax */
 	jnz	1b
@@ -7847,20 +7886,29 @@ real_geometry_tune:
 5:
 	/* Hmax is tuned ok. */
 
+	cmpb	$0xFF, %dh
+	jne	1f
+	/* consider Hmax=0xFF as a failure! Use the passed-in value. */
+	movb	%cs:(Heads_passed_in - _start1), %dh
+	testb	%dh, %dh
+	jnz	4f
+	decb	%dh
+4:
+	decb	%dh
+	movb	%dh, %cs:(Hmax_tuned - _start1)
+1:
 //////////////////////////////////////////////////////////////////////////////
 
 	/* tune Smax */
 
 	/* First, try the passed-in value */
 	movb	%cs:(Sectors_passed_in - _start1), %cl
-	
-	cmpb	$8, %cl
-	jb	1f
-
-	cmpb	$0, %cs:(cross_track - _start1)
-	jnz	4f
-	cmpb	%cs:(Smax_tuned - _start1), %cl
-	jnb	1f
+//	cmpb	$8, %cl
+//	jb	1f
+//	cmpb	$0, %cs:(cross_track - _start1)
+//	jnz	4f
+//	cmpb	%cs:(Smax_tuned - _start1), %cl
+//	jnb	1f
 4:
 	call	tune_sectors
 	jb	2f		/* failure */
@@ -7875,6 +7923,9 @@ real_geometry_tune:
 	incw	%cx		/* Next Smax */
 	cmpb	%cs:(Smax_tuned - _start1), %cl
 	jb	1b
+	cmpb	$63, %cl
+	jbe	4f
+	movb	$63, %cl
 
 4:
 	/* got Smax=CL */
@@ -7916,7 +7967,7 @@ tune_heads:
 
 	/* input:	DH = MaxHead + 1 */
 
-	movb	$0, %ch		/* cylinder: 0 - 3 */
+	movb	$0, %ch		/* cylinder: 0 - 4 */
 2:
 	/* read ending track of this cylinder */
 
@@ -7932,15 +7983,12 @@ tune_heads:
 	movw	%bx, %di
 	int	$0x13
 	popaw
-	jc	2f		/* failure */
+	//jc	2f		/* failure */
+	incb	%ch
+	jc	4f		/* considered OK */
+	decb	%ch
 
-	/* read beginning track of the next cylinder */
-
-	incb	%ch		/* next cylinder */
-
-	pushw	%dx		/* save DH */
-
-	movb	$0, %dh
+	/* read beginning track of this cylinder */
 
 	movb	$1, %cl		/* sector 1=the leading sector */
 	movb	$2, %ah		/* READ */
@@ -7952,13 +8000,53 @@ tune_heads:
 	pushaw
 	movw	%bx, %si
 	movw	%bx, %di
+	movb	$0, %dh
 	int	$0x13
 	popaw
-	popw	%dx		/* restore DH */
+	jc	2f		/* failure */
+
+	incb	%ch		/* next cylinder */
+
+	/* compare the two tracks */
+	call	cmp_track
+	je	4f		/* ok, try next cylinder */
+
+	/* read beginning track of the next cylinder */
+
+	movb	$1, %cl		/* sector 1=the leading sector */
+	movb	$2, %ah		/* READ */
+	movb	%cs:(Smax_tuned - _start1), %al	/* sectors to read */
+	movw	$0x5800, %bx
+	movw	%bx, %es
+	movw	%bx, %ds
+	xorw	%bx, %bx
+	pushaw
+	movw	%bx, %si
+	movw	%bx, %di
+	movb	$0, %dh
+	int	$0x13
+	popaw
 	jc	2f		/* failure */
 
 	/* compare the two tracks */
+	call	cmp_track
+	jne	3f		/* Next Hmax */
+4:
+	cmpb	$5, %ch		/* cylinder: 0 - 4 */
+	jb	2b		/* Next cylinder */
 
+	/* all passed, DH-1 is the final Hmax */
+	cmpb	$0, %dh
+	je	2f		/* failure */
+	ret			/* Flag: above */
+3:
+	cmpb	%dh, %dh	/* Flag: equal */
+	ret
+2:
+	stc			/* Flag: below */
+	ret
+
+cmp_track:
 	pushw	%cx
 	pushw	%si
 	pushw	%di
@@ -7975,20 +8063,6 @@ tune_heads:
 	popw	%di
 	popw	%si
 	popw	%cx
-	jne	3f		/* Next Hmax */
-
-	cmpb	$4, %ch
-	jb	2b		/* Next cylinder */
-
-	/* all passed, DH-1 is the final Hmax */
-	cmpb	$0, %dh
-	je	2f		/* failure */
-	ret			/* Flag: above */
-3:
-	cmpb	%dh, %dh	/* Flag: equal */
-	ret
-2:
-	stc			/* Flag: below */
 	ret
 
 //////////////////////////////////////////////////////////////////////////////
@@ -7997,11 +8071,26 @@ tune_sectors:
 
 	/* input:	CL = MaxSector */
 
-	movw	$10, %cs:(Smax_count - _start1)
+	movw	$16, %cs:(Smax_count - _start1)
 
-	movb	$0, %ch		/* cylinder: 0 - 7 */
+	movb	$0, %ch		/* cylinder: 0 - 6 */
 	movb	$0, %dh		/* head: 0 - Hmax */
 6:
+	/* read beginning sector of this track. */
+
+	movw	$0x201, %ax	/* read 1 sector */
+	movw	$0x5800, %bx
+	movw	%bx, %es
+	movw	%bx, %ds
+	xorw	%bx, %bx
+	pushaw
+	movb	$1, %cl		/* beginning sector */
+	movw	%bx, %si
+	movw	%bx, %di
+	int	$0x13
+	popaw
+	jc	2f		/* failure */
+
 	/* read ending sector of this track. */
 
 	movw	$0x202, %ax	/* read 2 sectors */
@@ -8014,15 +8103,25 @@ tune_sectors:
 	movw	%bx, %di
 	int	$0x13
 	popaw
-	jc	2f		/* failure */
+	//jc	2f		/* failure */
+
+	/* locate the next track. */
+
+	pushfw			/* save CF */
+	cmpb	%cs:(Hmax_tuned - _start1), %dh
+	jb	3f		/* Next track */
+	movb	$0xFF, %dh	/* head 0 of ... */
+	incb	%ch		/* ... the next cylinder. */
+3:
+	incb	%dh		/* next track */
+	popfw			/* restore CF */
+	jc	4f		/* considered OK */
+
+	/* compare the 2 sectors */
+	call	cmp_sector
+	je	4f		/* ok, try next track */
 
 	/* read beginning sector of the next track. */
-
-	incb	%dh		/* next track */
-
-	pushw	%cx		/* save CL */
-
-	movb	$1, %cl		/* sector 1=the leading sector */
 
 	movw	$0x201, %ax	/* read 1 sector */
 	movw	$0x5800, %bx
@@ -8032,13 +8131,39 @@ tune_sectors:
 	pushaw
 	movw	%bx, %si
 	movw	%bx, %di
+	movb	$1, %cl		/* sector 1=the leading sector */
 	int	$0x13
 	popaw
-	popw	%cx		/* restore CL */
 	jc	2f		/* failure */
 
-	/* compare the two sectors */
+	/* compare the 2 sectors */
+	call	cmp_sector
+	jne	3f		/* Next Smax */
+4:
+	decw	%cs:(Smax_count - _start1)
+	jz	6f
 
+	//cmpb	%cs:(Hmax_tuned - _start1), %dh
+	//jb	6b		/* Next track */
+	//movb	$0, %dh		/* head 0 of ... */
+	//incb	%ch		/* ... the next cylinder. */
+	cmpb	$7, %ch		/* any cylinder remains to check? */
+	jb	6b		/* yes, next track */
+6:
+	/* all passed, CL is the final Smax */
+	cmpb	$1, %cl
+	jbe	2f		/* failure */
+	ret			/* Flag: above */
+3:
+	/* not Maximum sector number */
+	cmpb	%cl, %cl	/* Flag: equal */
+	ret
+2:
+	/* I/O error, sector tune failed */
+	stc			/* Flag: below */
+	ret
+
+cmp_sector:
 	pushw	%cx
 	pushw	%si
 	pushw	%di
@@ -8054,28 +8179,6 @@ tune_sectors:
 	popw	%di
 	popw	%si
 	popw	%cx
-	jne	3f		/* Next Smax */
-
-	decw	%cs:(Smax_count - _start1)
-	jz	6f
-
-	cmpb	%cs:(Hmax_tuned - _start1), %dh
-	jb	6b		/* Next track */
-
-	movb	$0, %dh
-	incb	%ch
-	cmpb	$7, %ch
-	jb	6b		/* Next track */
-6:
-	/* all passed, CL is the final Smax */
-	cmpb	$1, %cl
-	jbe	2f		/* failure */
-	ret			/* Flag: above */
-3:
-	cmpb	%cl, %cl	/* Flag: equal */
-	ret
-2:
-	stc			/* Flag: below */
 	ret
 
 #;============================================================================
@@ -8094,7 +8197,7 @@ tune_sectors:
  *		call	realmode_printf
  * 		addw	$(2*(N+1)), %sp
  * 
- * where int13_handle should be the base of the CS segment,
+ * where _start1 should be the base of the CS segment,
  * and format_string like this:
  *
  * format_string:

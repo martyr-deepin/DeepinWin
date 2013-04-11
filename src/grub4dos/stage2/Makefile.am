@@ -18,8 +18,8 @@ noinst_LIBRARIES = libgrub.a
 libgrub_a_SOURCES = boot.c builtins.c char_io.c cmdline.c common.c \
 	disk_io.c fsys_ext2fs.c fsys_fat.c fsys_ntfs.c fsys_ffs.c fsys_iso9660.c \
 	fsys_jfs.c fsys_minix.c fsys_reiserfs.c fsys_ufs2.c \
-	fsys_vstafs.c fsys_xfs.c fsys_pxe.c gunzip.c md5.c serial.c stage2.c \
-	terminfo.c tparm.c graphics.c
+	fsys_vstafs.c fsys_xfs.c fsys_pxe.c fsys_fb.c gunzip.c md5.c serial.c \
+	stage2.c terminfo.c tparm.c graphics.c
 libgrub_a_CFLAGS = $(GRUB_CFLAGS) -I$(top_srcdir)/lib \
 	-DGRUB_UTIL=1 -DFSYS_EXT2FS=1 -DFSYS_FAT=1 -DFSYS_NTFS=1 -DFSYS_FFS=1 \
 	-DFSYS_ISO9660=1 -DFSYS_JFS=1 -DFSYS_MINIX=1 -DFSYS_REISERFS=1 \
@@ -85,8 +85,15 @@ else
 GRAPHICS_FLAGS =
 endif
 
+if GFX_SUPPORT
+GFX_FLAGS = -DSUPPORT_GFX=1
+else
+GFX_FLAGS =
+endif
+
 STAGE2_COMPILE = $(STAGE2_CFLAGS) -fno-builtin -nostdinc \
-	$(NETBOOT_FLAGS) $(SERIAL_FLAGS) $(HERCULES_FLAGS) $(GRAPHICS_FLAGS)
+	$(NETBOOT_FLAGS) $(SERIAL_FLAGS) $(HERCULES_FLAGS) $(GRAPHICS_FLAGS) \
+	$(GFX_FLAGS)
 
 STAGE1_5_LINK = -nostdlib -Wl,-N -Wl,-Ttext -Wl,2000 $(BIN_LDFLAGS)
 STAGE1_5_COMPILE = $(STAGE2_COMPILE) -DNO_DECOMPRESSION=1 -DSTAGE1_5=1
@@ -95,7 +102,7 @@ STAGE1_5_COMPILE = $(STAGE2_COMPILE) -DNO_DECOMPRESSION=1 -DSTAGE1_5=1
 pre_stage2_exec_SOURCES = asm.S bios.c boot.c builtins.c char_io.c \
 	cmdline.c common.c console.c disk_io.c fsys_ext2fs.c \
 	fsys_fat.c fsys_ntfs.c fsys_ffs.c fsys_iso9660.c fsys_jfs.c fsys_minix.c \
-	fsys_reiserfs.c fsys_ufs2.c fsys_vstafs.c fsys_xfs.c fsys_pxe.c gunzip.c \
+	fsys_reiserfs.c fsys_ufs2.c fsys_vstafs.c fsys_xfs.c fsys_pxe.c fsys_fb.c gunzip.c \
 	hercules.c md5.c serial.c smp-imps.c stage2.c terminfo.c tparm.c graphics.c
 pre_stage2_exec_CFLAGS = $(STAGE2_COMPILE) $(FSYS_CFLAGS)
 pre_stage2_exec_CCASFLAGS = $(STAGE2_COMPILE) $(FSYS_CFLAGS)
@@ -157,7 +164,7 @@ grub.exe: pre_stage2 dosstart
 	-rm -f grub.exe
 	echo -n -e "\000\000\000\000\000\000\000\000\000\000\000\000" | cat dosstart pre_stage2 - > grub.exe
 	if [ -f ../preset_menu_used ]; then cat ../preset_menu_used >> grub.exe ;fi
-	dd if=/dev/zero bs=1 count=4128 >> grub.exe
+	dd if=/dev/zero bs=4128 count=1 >> grub.exe
 
 badgrubstart_exec_SOURCES = badgrubstart.S
 badgrubstart_exec_CCASFLAGS = $(STAGE2_COMPILE)
@@ -172,7 +179,7 @@ badgrub.exe: pre_stage2 badgrubstart
 	-rm -f badgrub.exe
 	echo -n -e "\000\000\000\000\000\000\000\000\000\000\000\000" | cat badgrubstart pre_stage2 - > badgrub.exe
 	if [ -f ../preset_menu_used ]; then cat ../preset_menu_used >> badgrub.exe ;fi
-	dd if=/dev/zero bs=1 count=4128 >> badgrub.exe
+	dd if=/dev/zero bs=4128 count=1 >> badgrub.exe
 
 grldrstart_exec_SOURCES = grldrstart.S
 grldrstart_exec_CCASFLAGS = $(STAGE2_COMPILE)
@@ -367,4 +374,7 @@ pxegrub: pxeloader diskless
 SUFFIXES = .exec
 %: %.exec$(EXEEXT)
 	$(OBJCOPY) -O binary $< $@
+	if [ $@ = pre_stage2 ]; then dd if=pre_stage2 of=pre_stage2_fullsize bs=65536 skip=48 ;fi
+	if [ $@ = pre_stage2 ]; then sed -e "1s/^\x00*//" pre_stage2_fullsize > pre_stage2_tail ;fi
+	if [ $@ = pre_stage2 ]; then set dummy `ls -l pre_stage2_fullsize`; set $$6 `ls -l pre_stage2_tail`; dd if=pre_stage2 of=pre_stage2_head bs=`expr $$1 - $$6` count=1 ; cat pre_stage2_head pre_stage2_tail > pre_stage2 ;fi
 	if [ $@ = pre_stage2 ]; then echo -n -e "\0260\002\032\0316" >> $@ ;fi
