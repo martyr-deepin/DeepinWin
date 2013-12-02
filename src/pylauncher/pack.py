@@ -22,6 +22,7 @@
 import sys
 import os
 import shutil
+import subprocess
 from os.path import abspath, join, dirname
 
 SIGNATURE="@@@pylauncher@@@"
@@ -36,11 +37,12 @@ def compress(target_dir):
     if not os.path.exists(compressor):
         compressor = ajoin("C:", "Program Files (x86)", "7-Zip","7z.exe")
 
-    cmd = '%s a -t7z -m0=LZMA -mx -ms=4g -mfb=273 ../archive.7z *'
+    cmd = r'%s a -t7z -m0=LZMA -mx -ms=4g -mfb=273 ../archive.7z *'
     cmd = cmd % (compressor,)
     print cmd
     os.chdir(target_dir)
-    os.system(cmd)
+    #os.system(cmd)
+    subprocess.Popen(cmd).wait()
     os.chdir(cwd)
 
 def cat(outfile, *infiles):
